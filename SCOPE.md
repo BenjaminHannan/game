@@ -163,4 +163,14 @@ Each milestone leaves the game playable, so we can stop anywhere past M1 and sti
 
 1. **Theme check.** Deep sea is the recommendation, but the skeleton is theme-agnostic. Same game reskinned: **Potion Shop** (brew → apprentices → rare recipes discovered) or **Asteroid Mining** (ore → rigs → deeper into the belt). Swapping = editing `data.js` and the color palette.
 2. **Name.** Working title *Fathom*. Alternates: *Abyss Inc.*, *Deep Returns*, *Pressure*.
-3. **Balance numbers** above are starting points from proven idle curves — expect to tune them during playtesting, timeboxed so it doesn't eat the weekend.
+3. **Balance numbers** above are starting points from proven idle curves — expect to tune them during playtesting, timeboxed so it doesn’t eat the weekend.
+
+## v1 tuning notes (applied during the build)
+
+A balance review against Cookie Clicker's published curve and genre conventions changed the following from the tables above (current values always live in `js/data.js`):
+
+- **Late collector rates flattened upward**: Deep Station 47 → 60/s, Abyssal Trawler 260 → 400/s, Leviathan Tamer 1,400 → 2,600/s. The raw CC-style table loses roughly 2× value per tier and visibly stalls around tier 4 unless you ship CC's full upgrade web alongside it.
+- **Late ×2 upgrades arrive sooner**: Geothermal Taps 1M → 600K, Autonomous Routing 5M → 3.5M, so each tier's multiplier lands before that tier walls.
+- **Offline earnings**: 50% rate with a 10-hour cap (the browser-idle genre default) instead of 100%/4h. Gaps under 120 s accrue silently at full rate so Chrome's once-per-minute background-tab throttling never pops a false "welcome back" card.
+- **Artifacts are +25% each** (was +10%) so a second run is meaningfully faster than the first — genre rule of thumb is 3–10× or the reset reads as punishment.
+- **Save export/import shipped in v1** (was a stretch goal): Safari can purge localStorage after 7 days without a visit, so a copyable save code is cheap insurance.

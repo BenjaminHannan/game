@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fathom</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌊</text></svg>">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body data-zone="sunlight">
+
+  <header id="topbar">
+    <h1 class="logo">FATHOM</h1>
+    <div class="stats">
+      <div class="stat" title="Salvage">
+        <span class="stat-icon">⚙️</span>
+        <span class="stat-main" id="stat-salvage">0</span>
+        <span class="stat-sub"><span id="stat-rate">0</span>/s</span>
+      </div>
+      <div class="stat" title="Depth reached this expedition">
+        <span class="stat-icon">🌊</span>
+        <span class="stat-main"><span id="stat-depth">0</span> m</span>
+        <span class="stat-sub" id="stat-zone">Sunlight Zone</span>
+      </div>
+      <div class="stat" id="stat-artifact-box" hidden title="Artifacts: +25% production each, forever">
+        <span class="stat-icon">🏺</span>
+        <span class="stat-main" id="stat-artifacts">0</span>
+        <span class="stat-sub">artifacts</span>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section id="col-actions">
+      <button id="ping" class="ping-btn">
+        <span class="ping-icon">📡</span>
+        <span class="ping-label">Ping Sonar</span>
+        <span class="ping-power">+<span id="stat-click">1</span> salvage</span>
+      </button>
+
+      <div id="prestige-box" class="panel prestige" hidden>
+        <h2>⚓ Surface &amp; Refit</h2>
+        <p class="prestige-blurb">Reset your fleet. Keep your discoveries. Refit with abyssal alloys.</p>
+        <button id="prestige-btn" class="prestige-btn">
+          Surface for <span id="prestige-gain">0</span> 🏺
+          <small>+25% production each, permanent</small>
+        </button>
+      </div>
+
+      <div class="panel">
+        <h2>Fleet</h2>
+        <div id="collectors"></div>
+      </div>
+    </section>
+
+    <aside id="col-info">
+      <div class="panel">
+        <h2>Upgrades</h2>
+        <div id="upgrades"></div>
+        <p id="upgrades-empty" class="muted">Nothing on the workbench yet. Keep salvaging.</p>
+      </div>
+
+      <div class="panel">
+        <h2>Discovery Log <span class="disc-count" id="disc-count"></span></h2>
+        <div id="log"></div>
+      </div>
+
+      <div class="panel settings">
+        <button id="save-btn" class="ghost-btn">💾 Save now</button>
+        <button id="export-btn" class="ghost-btn">📤 Export</button>
+        <button id="import-btn" class="ghost-btn">📥 Import</button>
+        <button id="wipe-btn" class="ghost-btn danger">🗑️ Wipe save</button>
+        <span class="muted" id="save-note"></span>
+      </div>
+    </aside>
+  </main>
+
+  <div id="overlay" class="overlay" hidden>
+    <div class="card" id="overlay-card"></div>
+  </div>
+
+  <script type="module" src="js/ui.js"></script>
+</body>
+</html>
