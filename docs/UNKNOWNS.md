@@ -9,6 +9,7 @@ Running ledger of unresolved design questions. Resolve a milestone's entries wit
 
 ## Decided
 
+- **UI direction** — mirror CS2's UI *structure and interaction patterns* closely (bottom categorized toolbar, top-left city/clock, top-right treasury/population/demand cluster, info-view overlays, tooltip-with-cost conventions, progression panel) per docs/research/cs2/ux-conventions.md, so it feels immediately familiar. All icons, artwork, fonts, and visual styling are ORIGINAL — never copy the game's assets or distinctive art (owner asked for 1:1; scoped to patterns for copyright/trade-dress reasons, 2026-08-08).
 - **First five minutes** — start on an empty map: lay roads, paint zones, watch the first buildings grow (default, owner told us to proceed; veto anytime — genre-classic opening, 2026-08-08).
 - **Traffic model** — statistical flow per road edge plus lightweight visual vehicles (instanced meshes moving along edges). Per-vehicle agent pathfinding deferred to a later milestone (default: browser performance, 2026-08-08).
 - **Art style** — low-poly flat-shaded, zone-conventional palette (default; final variant pick stays open above, 2026-08-08).
