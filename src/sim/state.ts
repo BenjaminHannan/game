@@ -7,6 +7,14 @@
  */
 
 import type { SaveManager, SaveProvider } from '../core/save.js';
+import {
+  RoadNetwork,
+  cloneRoadNetworkData,
+  createRoadNetworkData,
+  normalizeRoadNetworkData,
+  type RoadNetworkData,
+  type RoadNetworkOptions,
+} from './roads.js';
 
 /** Default name for a new city. */
 export const DEFAULT_CITY_NAME = 'Riverbend';
@@ -26,6 +34,8 @@ export interface GameState {
   population: number;
   /** Simulation ticks elapsed. */
   tick: number;
+  /** The road graph. Wrapped for editing by {@link Simulation.roads}. */
+  roads: RoadNetworkData;
 }
 
 /** Create a fresh game state. */
@@ -36,6 +46,7 @@ export function createGameState(seed: number): GameState {
     money: STARTING_MONEY,
     population: 0,
     tick: 0,
+    roads: createRoadNetworkData(),
   };
 }
 
@@ -61,13 +72,19 @@ export class Simulation implements SaveProvider<GameState> {
   /** The live game state. */
   readonly state: GameState;
 
+  /** Editing surface over {@link GameState.roads}. */
+  readonly roads: RoadNetwork;
+
   private readonly systems: System[] = [];
 
   /**
    * @param seed Seed for the new game state.
+   * @param roadOptions Terrain sampler and world bounds for the road network.
+   *   The sampler can also be attached later via `roads.setSampler()`.
    */
-  constructor(seed: number) {
+  constructor(seed: number, roadOptions: RoadNetworkOptions = {}) {
     this.state = createGameState(seed);
+    this.roads = new RoadNetwork(this.state, roadOptions);
   }
 
   /** Append a system to the end of the pipeline. */
@@ -98,10 +115,14 @@ export class Simulation implements SaveProvider<GameState> {
   }
 
   serialize(): GameState {
-    return { ...this.state };
+    return { ...this.state, roads: cloneRoadNetworkData(this.state.roads) };
   }
 
   deserialize(data: GameState): void {
     Object.assign(this.state, data);
+    // Saves written before roads existed, or hand-edited ones, are repaired
+    // rather than trusted; renderers are told to rebuild from the new graph.
+    this.state.roads = normalizeRoadNetworkData(this.state.roads);
+    this.roads.markChanged();
   }
 }

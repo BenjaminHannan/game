@@ -160,6 +160,24 @@
   color: var(--accent);
 }
 
+/* --- Bottom centre: active-tool hint, sitting above the toolbar --- */
+.hud-hint {
+  bottom: 74px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--text);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.hud-hint.is-warning {
+  color: #ffb4ac;
+  border-color: rgba(225, 84, 74, 0.55);
+}
+
 /* --- Bottom right: debug readout --- */
 .hud-debug {
   bottom: 16px;

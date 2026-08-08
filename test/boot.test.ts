@@ -15,7 +15,9 @@ import { Sky } from '../src/render/sky.js';
 import { CameraRig } from '../src/render/cameraRig.js';
 import { InputManager } from '../src/input/input.js';
 import { SelectTool, ToolManager } from '../src/input/tools.js';
+import { RoadTool } from '../src/input/roadTool.js';
 import { Simulation } from '../src/sim/state.js';
+import { RoadRenderer, SURFACE_LIFT } from '../src/render/roadMesh.js';
 import { Hud } from '../src/ui/hud.js';
 
 describe('boot', () => {
@@ -103,6 +105,53 @@ describe('boot', () => {
 
     hud.dispose();
     input.dispose();
+  });
+
+  it('drives the road tool through the tool manager and drapes the meshes', () => {
+    const sim = new Simulation(20260101, { sampler: terrain, bounds: WORLD_HALF });
+    const roads = new RoadRenderer(sim.roads, terrain);
+    const tools = new ToolManager();
+    tools.register(new SelectTool());
+    tools.register(new RoadTool({ network: sim.roads, preview: roads, budget: sim.state }));
+    expect(tools.setActive('roads')).toBe(true);
+
+    const surface = roads.group.getObjectByName('RoadSurfaces') as THREE.Mesh;
+    expect(surface.geometry.getAttribute('position').count).toBe(0);
+
+    // Find a buildable 200m run somewhere on the central plains.
+    let start: [number, number] | null = null;
+    for (let x = -600; x <= 600 && !start; x += 64) {
+      for (let z = -600; z <= 600 && !start; z += 64) {
+        if (sim.roads.plan(x, z, x + 200, z).ok) start = [x, z];
+      }
+    }
+    expect(start).not.toBeNull();
+    const [sx, sz] = start as [number, number];
+
+    const hit = (x: number, z: number) => ({ x, y: terrain.heightAt(x, z), z });
+    tools.pointerMove(hit(sx, sz));
+    tools.pointerDown(hit(sx, sz), 0);
+    tools.pointerMove(hit(sx + 200, sz));
+    tools.pointerDown(hit(sx + 200, sz), 0);
+    // Chained: the second click both commits and re-arms from the endpoint.
+    tools.pointerDown(hit(sx + 400, sz), 0);
+
+    expect(sim.roads.edges.length).toBeGreaterThanOrEqual(1);
+    expect(sim.state.money).toBeLessThan(500000);
+
+    roads.update();
+    const positions = surface.geometry.getAttribute('position');
+    expect(positions.count).toBeGreaterThan(0);
+    // Every road vertex sits just above the ground beneath it.
+    for (let i = 0; i < positions.count; i += 7) {
+      const x = positions.getX(i);
+      const z = positions.getZ(i);
+      expect(positions.getY(i)).toBeCloseTo(terrain.heightAt(x, z) + SURFACE_LIFT, 4);
+    }
+
+    tools.key('Escape');
+    tools.setActive('select');
+    roads.dispose();
   });
 
   it('keeps the camera target inside the world when panning hard', () => {

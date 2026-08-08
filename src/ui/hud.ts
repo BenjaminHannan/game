@@ -13,7 +13,7 @@ import type { GameState } from '../sim/state.js';
 import type { ToolManager } from '../input/tools.js';
 import { formatDate, formatTimeOfDay } from '../core/time.js';
 
-/** Toolbar entries. Every id currently maps to the select tool. */
+/** Toolbar entries. Ids without a registered tool fall back to select. */
 const TOOL_BUTTONS: ReadonlyArray<{ id: string; label: string }> = [
   { id: 'select', label: 'Select' },
   { id: 'roads', label: 'Roads' },
@@ -54,6 +54,7 @@ export class Hud {
   private readonly moneyEl: HTMLElement;
   private readonly populationEl: HTMLElement;
   private readonly debugEl: HTMLElement;
+  private readonly hintEl: HTMLElement;
   private readonly speedButtons = new Map<GameSpeed, HTMLButtonElement>();
   private readonly toolButtons = new Map<string, HTMLButtonElement>();
 
@@ -113,10 +114,14 @@ export class Hud {
       toolbar.append(btn);
     }
 
+    // --- Bottom centre, above the toolbar: active-tool hint ---
+    this.hintEl = el('div', 'hud-panel hud-hint');
+    this.hintEl.hidden = true;
+
     // --- Bottom right ---
     this.debugEl = el('div', 'hud-panel hud-debug');
 
-    this.root.append(city, status, toolbar, this.debugEl);
+    this.root.append(city, status, toolbar, this.hintEl, this.debugEl);
     mount.append(this.root);
 
     this.keyListener = (e) => this.onKey(e);
@@ -149,6 +154,22 @@ export class Hud {
       `tick <span class="hud-debug__value">${tick}</span>`;
   }
 
+  /**
+   * Show a short hint for the active tool above the toolbar.
+   * @param text Hint text, or `null`/empty to hide the hint.
+   * @param warning Style the hint as a rejection.
+   */
+  setHint(text: string | null, warning = false): void {
+    if (!text) {
+      this.hintEl.hidden = true;
+      this.hintEl.textContent = '';
+      return;
+    }
+    this.hintEl.textContent = text;
+    this.hintEl.classList.toggle('is-warning', warning);
+    this.hintEl.hidden = false;
+  }
+
   /** Remove the HUD and its listeners. */
   dispose(): void {
     window.removeEventListener('keydown', this.keyListener);
@@ -178,7 +199,9 @@ export class Hud {
   }
 
   private selectTool(id: string): void {
-    // Only the select tool exists so far; other buttons show active state only.
+    // Clear first: the incoming tool publishes its own hint as it activates.
+    this.setHint(null);
+    // Buttons without a registered tool fall back to select but still light up.
     this.tools.setActive(this.tools.ids().includes(id) ? id : 'select');
     this.setToolActive(id);
   }
