@@ -73,6 +73,38 @@ export const ZONE_COST_PER_CELL = 10;
 /** Packed cell key: `cz * ZONE_GRID_SIZE + cx`, both in `[0, ZONE_GRID_SIZE)`. */
 export type CellKey = number;
 
+/** Quadrant index: 0 = +x, 1 = +z, 2 = -x, 3 = -z. */
+export type Facing = 0 | 1 | 2 | 3;
+
+/** Column step of each {@link Facing} quadrant. */
+export const FACING_DX: readonly number[] = [1, 0, -1, 0];
+
+/** Row step of each {@link Facing} quadrant. */
+export const FACING_DZ: readonly number[] = [0, 1, 0, -1];
+
+/**
+ * Column step *along* a frontage line, i.e. the quadrant rotated a quarter turn.
+ * Walking a lot's width uses this; walking its depth uses `-FACING_D*`.
+ */
+export const ALONG_DX: readonly number[] = [0, -1, 0, 1];
+
+/** Row step along a frontage line. */
+export const ALONG_DZ: readonly number[] = [1, 0, -1, 0];
+
+/**
+ * Step from a cell by whole cells, or -1 when the result leaves the grid.
+ *
+ * Stepping through packed keys arithmetically would wrap around a row edge, so
+ * the column is unpacked and bounds-checked explicitly.
+ */
+export function cellStep(k: CellKey, dx: number, dz: number): CellKey {
+  if (k < 0 || k >= ZONE_CELL_COUNT) return -1;
+  const cx = cellX(k) + dx;
+  const cz = cellZ(k) + dz;
+  if (cx < 0 || cx >= ZONE_GRID_SIZE || cz < 0 || cz >= ZONE_GRID_SIZE) return -1;
+  return cellKey(cx, cz);
+}
+
 /** The three zone types v1 ships (RCI; office folds into commercial). */
 export const ZONE_TYPES = ['residential', 'commercial', 'industrial'] as const;
 
@@ -334,6 +366,36 @@ export class ZoningState {
   isStranded(k: CellKey): boolean {
     if (k < 0 || k >= ZONE_CELL_COUNT) return false;
     return this.zone[k] !== 0 && (this.frontage[k] as number) < 0;
+  }
+
+  /**
+   * True when a building could stand on this cell right now: a road reaches it,
+   * the player painted it, and nothing occupies it yet.
+   */
+  isVacant(k: CellKey): boolean {
+    if (k < 0 || k >= ZONE_CELL_COUNT) return false;
+    return (
+      this.zone[k] !== 0 &&
+      (this.frontage[k] as number) >= 0 &&
+      this.occupant[k] === NO_OCCUPANT
+    );
+  }
+
+  /** Building standing on a cell, or {@link NO_OCCUPANT}. */
+  occupantAt(k: CellKey): number {
+    if (k < 0 || k >= ZONE_CELL_COUNT) return NO_OCCUPANT;
+    return this.occupant[k] as number;
+  }
+
+  /** Claim or release a cell for a building. Derived state; never serialized. */
+  setOccupant(k: CellKey, buildingId: number): void {
+    if (k < 0 || k >= ZONE_CELL_COUNT) return;
+    this.occupant[k] = buildingId;
+  }
+
+  /** Release every claimed cell. Called before rebuilding from a save. */
+  clearOccupants(): void {
+    this.occupant.fill(NO_OCCUPANT);
   }
 
   /** Painted zone of a cell, or `'none'`. */
