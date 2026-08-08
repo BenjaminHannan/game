@@ -11,11 +11,21 @@ import { Terrain, WORLD_HALF } from './render/terrain.js';
 import { Sky } from './render/sky.js';
 import { CameraRig } from './render/cameraRig.js';
 import { RoadRenderer } from './render/roadMesh.js';
+import { ZoneOverlay } from './render/zoneOverlay.js';
 import { InputManager } from './input/input.js';
 import { SelectTool, ToolManager } from './input/tools.js';
 import { RoadTool } from './input/roadTool.js';
-import { Simulation } from './sim/state.js';
+import { ZONE_TOOL_MODES, ZoneTool } from './input/zoneTool.js';
+import { Simulation, ZoningSystem } from './sim/state.js';
 import type { RoadEdgeData, RoadNetwork } from './sim/roads.js';
+import {
+  ZONE_COLORS,
+  cellAt,
+  type CellKey,
+  type ZonePaint,
+  type ZoneType,
+  type ZoningState,
+} from './sim/zoning.js';
 import { Hud } from './ui/hud.js';
 
 /** Seed for this session's world. Fixed for now; later chosen at new-game time. */
@@ -33,12 +43,41 @@ export interface MetropolisDebugApi {
   tools: ToolManager;
   roads: RoadNetwork;
   roadTool: RoadTool;
+  zoning: ZoningState;
+  zoneTool: ZoneTool;
+  zoneOverlay: ZoneOverlay;
   /** Switch the active tool by id, e.g. `'roads'`. */
   selectTool(id: string): boolean;
   /** Place one segment between two raw world positions, snapping both ends. */
   placeRoad(ax: number, az: number, bx: number, bz: number): RoadEdgeData | null;
   /** Place a chain of segments through a list of `[x, z]` world positions. */
   placeRoadPath(points: ReadonlyArray<readonly [number, number]>): RoadEdgeData[];
+  /** Choose the zone brush without going through the HUD. */
+  setZonePaint(paint: ZonePaint): void;
+  /**
+   * Drag-paint a straight stroke between two raw world positions, exactly as a
+   * pointer drag would (brush, interpolation, fee and truncation all apply).
+   * @returns How many cells changed.
+   */
+  paintZone(x1: number, z1: number, x2: number, z2: number, paint?: ZonePaint): number;
+  /** Recompute frontage immediately rather than waiting for the next tick. */
+  rebuildZoneCells(): void;
+  /** Everything known about the cell under a world position. */
+  zoneCellAt(
+    x: number,
+    z: number,
+  ): {
+    key: CellKey;
+    zone: ZonePaint;
+    zonable: boolean;
+    road: boolean;
+    stranded: boolean;
+    frontage: number;
+    depth: number;
+    facing: number;
+  } | null;
+  /** Painted cell counts per zone, plus the zonable and zoned totals. */
+  zoneCounts(): Record<ZoneType, number> & { zonable: number; zoned: number };
 }
 
 declare global {
@@ -71,6 +110,13 @@ function boot(): void {
   const roadRenderer = new RoadRenderer(simulation.roads, terrain);
   renderer.scene.add(roadRenderer.group);
 
+  // Zone cells are derived from the road graph, so they rebuild on the tick
+  // after any road edit rather than on the frame the player clicked.
+  const zoning = simulation.zoning;
+  simulation.addSystem(new ZoningSystem(zoning));
+  const zoneOverlay = new ZoneOverlay(zoning, terrain);
+  renderer.scene.add(zoneOverlay.group);
+
   // --- View and input ---
   const rig = new CameraRig(terrain, renderer.aspect);
   rig.jumpTo(-260, -160, 520);
@@ -91,6 +137,38 @@ function boot(): void {
     },
   });
   tools.register(roadTool);
+
+  const zoneTool = new ZoneTool({
+    zoning,
+    preview: zoneOverlay,
+    budget: simulation.state,
+    onStatus: (status) => {
+      hud.setHint(status.message || null, status.cells === 0 && status.painting);
+    },
+  });
+  tools.register(zoneTool);
+
+  // The zone tool's four brushes ride in the HUD's tool-options row, shown only
+  // while the "Zones" toolbar entry is active.
+  hud.registerToolModes(
+    'zones',
+    ZONE_TOOL_MODES.map((mode) => ({
+      id: mode.paint,
+      label: mode.label,
+      color: mode.paint === 'none' ? undefined : ZONE_COLORS[mode.paint],
+      onSelect: () => {
+        tools.setActive('zones');
+        zoneTool.setPaint(mode.paint);
+      },
+    })),
+    zoneTool.paint,
+  );
+
+  // The faint tint over unpainted-but-zonable cells is a zone-tool affordance,
+  // so it follows the tool rather than being always on.
+  const syncOverlayMode = (): void => {
+    zoneOverlay.setShowEmptyCells(tools.current?.id === 'zones');
+  };
 
   // Route world pointer events to the active tool. The HUD sits in its own
   // overlay, so anything reaching the canvas is a world interaction.
@@ -121,6 +199,8 @@ function boot(): void {
 
     terrain.update(dt);
     roadRenderer.update();
+    syncOverlayMode();
+    zoneOverlay.update();
     sky.update(hourOfDay(simulation.state.tick), rig.target);
 
     renderer.render(rig.camera);
@@ -138,6 +218,9 @@ function boot(): void {
     tools,
     roads: simulation.roads,
     roadTool,
+    zoning,
+    zoneTool,
+    zoneOverlay,
     selectTool: (id) => tools.setActive(id),
     placeRoad: (ax, az, bx, bz) => simulation.roads.placeSegment(ax, az, bx, bz),
     placeRoadPath: (points) => {
@@ -150,12 +233,43 @@ function boot(): void {
       }
       return built;
     },
+    setZonePaint: (paint) => {
+      zoneTool.setPaint(paint);
+      hud.setToolMode('zones', paint);
+    },
+    paintZone: (x1, z1, x2, z2, paint) => {
+      // Frontage must be current before the stroke: a road placed in the same
+      // frame has not been through a tick yet.
+      zoning.rebuildIfStale();
+      const changed = zoneTool.paintStroke(x1, z1, x2, z2, paint);
+      hud.setToolMode('zones', zoneTool.paint);
+      return changed;
+    },
+    rebuildZoneCells: () => {
+      zoning.rebuildFrontage();
+    },
+    zoneCellAt: (x, z) => {
+      const key = cellAt(x, z);
+      if (key < 0) return null;
+      return {
+        key,
+        zone: zoning.zoneAt(key),
+        zonable: zoning.isZonable(key),
+        road: zoning.isRoadCell(key),
+        stranded: zoning.isStranded(key),
+        frontage: zoning.frontage[key] as number,
+        depth: zoning.depth[key] as number,
+        facing: zoning.facing[key] as number,
+      };
+    },
+    zoneCounts: () => zoning.counts(),
   };
 
   console.log(
-    '%cMetropolis%c — roads online.\n' +
+    '%cMetropolis%c — roads and zoning online.\n' +
       'WASD / middle-drag pan · right-drag rotate · wheel zoom · Space pause · 1/2/3 speed\n' +
-      'Roads tool: click to start, click to chain segments, Esc or right-click to cancel',
+      'Roads tool: click to start, click to chain segments, Esc or right-click to cancel\n' +
+      'Zones tool: drag to paint, right-drag to erase, [ and ] resize the brush',
     'font-weight:bold;color:#4da3ff',
     'color:inherit',
   );

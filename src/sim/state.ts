@@ -15,6 +15,7 @@ import {
   type RoadNetworkData,
   type RoadNetworkOptions,
 } from './roads.js';
+import { ZoningState, createZoningSaveData, type ZoningSaveData } from './zoning.js';
 
 /** Default name for a new city. */
 export const DEFAULT_CITY_NAME = 'Riverbend';
@@ -36,6 +37,15 @@ export interface GameState {
   tick: number;
   /** The road graph. Wrapped for editing by {@link Simulation.roads}. */
   roads: RoadNetworkData;
+  /**
+   * The painted zone layer, run-length encoded.
+   *
+   * Unlike `roads`, this is a *snapshot* rather than the live representation:
+   * the working data is 262 144 cells of typed array owned by
+   * {@link Simulation.zoning}, which no JSON document can hold. The field is
+   * refreshed on serialize and repopulated on deserialize.
+   */
+  zoning: ZoningSaveData;
 }
 
 /** Create a fresh game state. */
@@ -47,6 +57,7 @@ export function createGameState(seed: number): GameState {
     population: 0,
     tick: 0,
     roads: createRoadNetworkData(),
+    zoning: createZoningSaveData(),
   };
 }
 
@@ -75,6 +86,9 @@ export class Simulation implements SaveProvider<GameState> {
   /** Editing surface over {@link GameState.roads}. */
   readonly roads: RoadNetwork;
 
+  /** The zone cell grid, derived from {@link roads} and painted by the player. */
+  readonly zoning: ZoningState;
+
   private readonly systems: System[] = [];
 
   /**
@@ -85,6 +99,7 @@ export class Simulation implements SaveProvider<GameState> {
   constructor(seed: number, roadOptions: RoadNetworkOptions = {}) {
     this.state = createGameState(seed);
     this.roads = new RoadNetwork(this.state, roadOptions);
+    this.zoning = new ZoningState({ network: this.roads });
   }
 
   /** Append a system to the end of the pipeline. */
@@ -115,7 +130,14 @@ export class Simulation implements SaveProvider<GameState> {
   }
 
   serialize(): GameState {
-    return { ...this.state, roads: cloneRoadNetworkData(this.state.roads) };
+    // The zone layer is encoded fresh: the live cells are typed arrays, and
+    // `state.zoning` is only ever the snapshot of them.
+    this.state.zoning = this.zoning.serialize();
+    return {
+      ...this.state,
+      roads: cloneRoadNetworkData(this.state.roads),
+      zoning: { zoneRuns: [...this.state.zoning.zoneRuns] },
+    };
   }
 
   deserialize(data: GameState): void {
@@ -124,5 +146,31 @@ export class Simulation implements SaveProvider<GameState> {
     // rather than trusted; renderers are told to rebuild from the new graph.
     this.state.roads = normalizeRoadNetworkData(this.state.roads);
     this.roads.markChanged();
+    // Zoning decodes after roads, because frontage is rebuilt from the graph
+    // that just landed. A version-1 save has no zoning branch at all, which
+    // normalizes to an empty grid.
+    this.zoning.deserialize(this.state.zoning);
+    this.state.zoning = this.zoning.serialize();
+  }
+}
+
+/**
+ * Keeps the derived zone cells in step with the road graph.
+ *
+ * Frontage is a full recompute (zoning-growth.md §2) triggered lazily by a
+ * revision comparison, so a tick in which no road changed costs one integer
+ * compare. Registered before any system that reads zonable cells.
+ */
+export class ZoningSystem implements System {
+  readonly id = 'zoning';
+
+  private readonly zoning: ZoningState;
+
+  constructor(zoning: ZoningState) {
+    this.zoning = zoning;
+  }
+
+  step(): void {
+    this.zoning.rebuildIfStale();
   }
 }

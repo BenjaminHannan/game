@@ -24,6 +24,22 @@ const TOOL_BUTTONS: ReadonlyArray<{ id: string; label: string }> = [
   { id: 'info', label: 'Info' },
 ];
 
+/**
+ * One entry in a tool's options row — the sub-mode strip that appears above the
+ * toolbar while its owning tool is active (the "tool options panel" of the v1
+ * HUD structure). Zoning uses it for its four brushes.
+ */
+export interface ToolModeButton {
+  /** Stable id, unique within the owning tool. */
+  id: string;
+  /** Player-facing label. */
+  label: string;
+  /** Optional swatch colour as a 24-bit hex number. */
+  color?: number;
+  /** Invoked when the player picks this mode. */
+  onSelect(): void;
+}
+
 const SPEED_BUTTONS: ReadonlyArray<{ speed: GameSpeed; label: string; title: string }> = [
   { speed: 0, label: '‖', title: 'Pause (Space)' },
   { speed: 1, label: '1x', title: 'Normal speed (1)' },
@@ -55,8 +71,18 @@ export class Hud {
   private readonly populationEl: HTMLElement;
   private readonly debugEl: HTMLElement;
   private readonly hintEl: HTMLElement;
+  private readonly modesEl: HTMLElement;
   private readonly speedButtons = new Map<GameSpeed, HTMLButtonElement>();
   private readonly toolButtons = new Map<string, HTMLButtonElement>();
+
+  /** Sub-mode strips, keyed by owning tool id. */
+  private readonly toolModes = new Map<
+    string,
+    { buttons: Map<string, HTMLButtonElement>; row: HTMLElement }
+  >();
+
+  /** Tool whose options row is currently shown, or `null`. */
+  private shownModesFor: string | null = null;
 
   private readonly keyListener: (e: KeyboardEvent) => void;
 
@@ -109,19 +135,23 @@ export class Hud {
       const btn = document.createElement('button');
       btn.className = 'hud-tool';
       btn.textContent = def.label;
+      btn.dataset.tool = def.id;
       btn.addEventListener('click', () => this.selectTool(def.id));
       this.toolButtons.set(def.id, btn);
       toolbar.append(btn);
     }
 
-    // --- Bottom centre, above the toolbar: active-tool hint ---
+    // --- Bottom centre, above the toolbar: tool options, then the hint ---
+    this.modesEl = el('div', 'hud-modes');
+    this.modesEl.hidden = true;
+
     this.hintEl = el('div', 'hud-panel hud-hint');
     this.hintEl.hidden = true;
 
     // --- Bottom right ---
     this.debugEl = el('div', 'hud-panel hud-debug');
 
-    this.root.append(city, status, toolbar, this.hintEl, this.debugEl);
+    this.root.append(city, status, toolbar, this.modesEl, this.hintEl, this.debugEl);
     mount.append(this.root);
 
     this.keyListener = (e) => this.onKey(e);
@@ -170,6 +200,60 @@ export class Hud {
     this.hintEl.hidden = false;
   }
 
+  /** Tool whose options row is on screen, or `null` when none is shown. */
+  get visibleToolModes(): string | null {
+    return this.shownModesFor;
+  }
+
+  /**
+   * Attach a row of sub-mode buttons to a tool. The row is shown whenever that
+   * tool is the active one and hidden otherwise, giving the zone tool its four
+   * brushes without the HUD knowing anything about zoning.
+   *
+   * @param toolId Tool the row belongs to, e.g. `'zones'`.
+   * @param modes Buttons, in display order.
+   * @param activeId Mode highlighted initially.
+   */
+  registerToolModes(toolId: string, modes: readonly ToolModeButton[], activeId?: string): void {
+    this.toolModes.get(toolId)?.row.remove();
+
+    const row = el('div', 'hud-panel hud-mode-row');
+    row.dataset.tool = toolId;
+    const buttons = new Map<string, HTMLButtonElement>();
+    for (const mode of modes) {
+      const btn = document.createElement('button');
+      btn.className = 'hud-mode';
+      btn.dataset.tool = toolId;
+      btn.dataset.mode = mode.id;
+      if (mode.color !== undefined) {
+        const swatch = el('span', 'hud-mode__swatch');
+        swatch.style.background = `#${mode.color.toString(16).padStart(6, '0')}`;
+        btn.append(swatch);
+      }
+      const text = el('span', 'hud-mode__label');
+      text.textContent = mode.label;
+      btn.append(text);
+      btn.addEventListener('click', () => {
+        mode.onSelect();
+        this.setToolMode(toolId, mode.id);
+      });
+      buttons.set(mode.id, btn);
+      row.append(btn);
+    }
+
+    this.modesEl.append(row);
+    this.toolModes.set(toolId, { buttons, row });
+    if (activeId) this.setToolMode(toolId, activeId);
+    this.syncToolModes(this.activeToolId());
+  }
+
+  /** Highlight one sub-mode of a tool, without invoking its callback. */
+  setToolMode(toolId: string, modeId: string): void {
+    const entry = this.toolModes.get(toolId);
+    if (!entry) return;
+    for (const [id, btn] of entry.buttons) btn.classList.toggle('is-active', id === modeId);
+  }
+
   /** Remove the HUD and its listeners. */
   dispose(): void {
     window.removeEventListener('keydown', this.keyListener);
@@ -210,6 +294,27 @@ export class Hud {
     for (const [toolId, btn] of this.toolButtons) {
       btn.classList.toggle('is-active', toolId === id);
     }
+    this.syncToolModes(id);
+  }
+
+  /** Id of the toolbar button currently lit, or `null`. */
+  private activeToolId(): string | null {
+    for (const [toolId, btn] of this.toolButtons) {
+      if (btn.classList.contains('is-active')) return toolId;
+    }
+    return null;
+  }
+
+  /** Show only the active tool's options row. */
+  private syncToolModes(activeId: string | null): void {
+    let shown = false;
+    for (const [toolId, entry] of this.toolModes) {
+      const visible = toolId === activeId;
+      entry.row.hidden = !visible;
+      shown = shown || visible;
+    }
+    this.modesEl.hidden = !shown;
+    this.shownModesFor = shown ? activeId : null;
   }
 
   private onKey(e: KeyboardEvent): void {

@@ -7,8 +7,14 @@
  * from a file.
  */
 
-/** Current save format version. Bump when the document shape changes. */
-export const SAVE_VERSION = 1;
+/**
+ * Current save format version. Bump when the document shape changes.
+ *
+ * - 1: engine foundation and the road graph.
+ * - 2: adds the `zoning` branch (run-length encoded zone cells). Version-1
+ *   documents load as a city with no zoning painted, which is exactly right.
+ */
+export const SAVE_VERSION = 2;
 
 /** Prefix for localStorage keys holding save slots. */
 export const SLOT_PREFIX = 'metropolis:save:';
