@@ -7,6 +7,7 @@ Research notes on how *Cities: Skylines II* (Colossal Order / Paradox Interactiv
 - **[Wiki]** — attributed by search results to the official Paradox wiki. Likely accurate, not independently verified.
 - **[Dev]** — Colossal Order / Paradox dev-diary or feature material, or press reporting of it.
 - **[Community]** — player guides, Steam discussions, forum analyses, modder writeups. May be patch-specific or personal testing.
+- **[Press]** — games-press reporting based on hands-on play.
 - **[Inferred]** — my own reasoning from the above, not stated by any source.
 - **[Conflict]** — sources disagree; both readings given.
 
