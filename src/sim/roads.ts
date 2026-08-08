@@ -60,6 +60,13 @@ export interface RoadClass {
   readonly speedLimit: number;
   /** Construction cost per metre (roads.md: ~2 per metre for a two-lane road). */
   readonly costPerMetre: number;
+  /**
+   * Whether this class emits zoning cells along its frontage
+   * (zoning-growth.md §2). Both v1 classes do; the later highway tier will not,
+   * and keeping it as data means that stays a catalogue change rather than a
+   * special case in the zoning code.
+   */
+  readonly zonable: boolean;
 }
 
 /** The road catalogue. Kept as data, not special cases (roads.md §Interconnections). */
@@ -71,6 +78,7 @@ export const ROAD_CLASSES: Readonly<Record<RoadClassId, RoadClass>> = {
     pavedWidth: 7,
     speedLimit: 30,
     costPerMetre: 1,
+    zonable: true,
   },
   small: {
     id: 'small',
@@ -79,6 +87,7 @@ export const ROAD_CLASSES: Readonly<Record<RoadClassId, RoadClass>> = {
     pavedWidth: 10,
     speedLimit: 40,
     costPerMetre: 2,
+    zonable: true,
   },
 };
 
