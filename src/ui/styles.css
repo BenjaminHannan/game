@@ -9,6 +9,8 @@
   --accent: #4da3ff;
   --accent-soft: rgba(77, 163, 255, 0.18);
   --money: #6ee7a8;
+  --warning: #f2c14e;
+  --danger: #ff6b6b;
   --shadow: 0 6px 24px rgba(0, 0, 0, 0.42);
 }
 
@@ -88,6 +90,70 @@
 
 .hud-stat__value--money {
   color: var(--money);
+}
+
+/* Broke and losing-money states (simulation.md §5 rule 5). */
+.hud-stat__value.is-warning {
+  color: var(--warning);
+}
+
+.hud-stat__value.is-broke {
+  color: var(--danger);
+}
+
+/* Sub-line under a stat: the monthly net, the jobs ratio. */
+.hud-stat__sub {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  min-height: 13px;
+}
+
+.hud-stat__sub--money.is-negative {
+  color: var(--warning);
+}
+
+/* RCI demand: three vertical bars growing from the centre line, so negative
+   demand reads as a downward bar rather than as an empty track. */
+.hud-demand {
+  display: flex;
+  gap: 5px;
+  justify-content: flex-end;
+  align-items: flex-end;
+  height: 26px;
+}
+
+.hud-demand__track {
+  position: relative;
+  width: 12px;
+  height: 100%;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+
+.hud-demand__axis {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.hud-demand__fill {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 0;
+  transition:
+    height 120ms linear,
+    top 120ms linear;
+}
+
+.hud-demand__fill.is-negative {
+  opacity: 0.55;
 }
 
 .hud-speed {

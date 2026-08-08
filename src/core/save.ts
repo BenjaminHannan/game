@@ -15,12 +15,23 @@
  *   documents load as a city with no zoning painted, which is exactly right.
  * - 3: adds the `buildings` and `demand` branches. Older documents load as a
  *   city whose zoning has not grown anything yet, which is also exactly right.
+ * - 4: adds the `economy` branch (tax rates, the in-progress month and the last
+ *   settled one) and records `cost` on every road edge. Older documents load
+ *   with a fresh ledger at the default tax rate and edge costs re-derived at
+ *   the current catalogue price.
  *
  * Every branch is read through a `normalize*` function rather than trusted, so
  * a missing branch degrades instead of throwing and no migration step is needed
- * for any version so far.
+ * for any version so far. `simulation.md` §8's posture — additive fields with
+ * defaults do not *require* a bump — still holds; the number is bumped anyway
+ * because this project's slot listing shows it, and a save the player can see
+ * labelled with the build that wrote it is worth one integer. Bumping is safe
+ * in the direction that matters: `loadFromString` refuses only *newer*
+ * documents. An explicit `migrate(doc, fromVersion)` step is still owed the
+ * first time a field changes meaning or is removed; the normalizers tolerate
+ * garbage, they do not understand history.
  */
-export const SAVE_VERSION = 3;
+export const SAVE_VERSION = 4;
 
 /** Prefix for localStorage keys holding save slots. */
 export const SLOT_PREFIX = 'metropolis:save:';

@@ -29,15 +29,24 @@ import {
   type RoadPoint,
   type RoadRejection,
 } from '../sim/roads.js';
+import type { LedgerCategory } from '../sim/economy.js';
 
 /** Anything that can display (or ignore) the placement ghost. */
 export interface RoadPreviewTarget {
   setPreview(plan: RoadPlan | null): void;
 }
 
-/** Treasury the tool charges construction to. */
+/**
+ * Treasury the tool charges construction to.
+ *
+ * A bare `{ money }` still works — that is what the headless tests pass — but
+ * when the object also offers {@link Ledger.spend} the tool uses it, so the
+ * "nothing outside the ledger writes `state.money`" invariant of
+ * `docs/research/simulation.md` §4 holds for every real game session.
+ */
 export interface RoadBudget {
   money: number;
+  spend?(amount: number, category: LedgerCategory): boolean;
 }
 
 /** What the tool is currently doing, for HUD hints. */
@@ -219,7 +228,18 @@ export class RoadTool extends BaseTool {
       this.emitStatus();
       return null;
     }
-    if (this.budget) this.budget.money -= plan.cost;
+    // Price in the plan, charge on commit (simulation.md §4). `affordable`
+    // already rejected anything the treasury cannot cover, so a refusal here
+    // means the balance moved between preview and click — roll the segment back
+    // rather than build one the city has not paid for.
+    if (!this.charge(plan.cost)) {
+      this.network.removeEdge(edge.id);
+      plan.ok = false;
+      plan.reason = 'unaffordable';
+      this.previewTarget?.setPreview(plan);
+      this.emitStatus();
+      return null;
+    }
 
     const endNode = this.network.node(edge.to);
     this.start = endNode
@@ -244,6 +264,18 @@ export class RoadTool extends BaseTool {
     this.currentPlan = null;
     this.previewTarget?.setPreview(null);
     this.emitStatus();
+  }
+
+  /**
+   * Debit the treasury for a committed segment.
+   * @returns `false` when the treasury could not cover it and nothing was taken.
+   */
+  private charge(amount: number): boolean {
+    if (!this.budget || amount <= 0) return true;
+    if (this.budget.spend) return this.budget.spend(amount, 'construction');
+    if (this.budget.money < amount) return false;
+    this.budget.money -= amount;
+    return true;
   }
 
   /** Downgrade an otherwise-valid plan the treasury cannot cover. */

@@ -164,6 +164,28 @@ export class Engine {
     this.speed = s;
   }
 
+  /**
+   * Run `count` simulation ticks immediately, outside the accumulator.
+   *
+   * For tests and the debug console: a scripted browser run needs to fast
+   * forward a year without waiting twelve real minutes, and doing it here keeps
+   * the engine's tick index and the simulation's in step — which stepping the
+   * simulation directly would not. Any partially accumulated real time is
+   * dropped, so the next frame starts from a clean boundary.
+   *
+   * @returns How many ticks were run.
+   */
+  advanceTicks(count: number): number {
+    const steps = Math.max(0, Math.floor(count));
+    for (let i = 0; i < steps; i++) {
+      const tick = this.accumulator.currentTick + 1;
+      this.accumulator.reset(tick);
+      for (const cb of this.tickCallbacks) cb(tick);
+    }
+    this.tickCount += steps;
+    return steps;
+  }
+
   /** Begin the render loop. Safe to call more than once. */
   start(): void {
     if (this.running) return;

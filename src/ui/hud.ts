@@ -12,6 +12,8 @@ import type { Engine, GameSpeed } from '../core/engine.js';
 import type { GameState } from '../sim/state.js';
 import type { ToolManager } from '../input/tools.js';
 import { formatDate, formatTimeOfDay } from '../core/time.js';
+import { ZONE_COLORS } from '../sim/zoning.js';
+import type { CityTotals } from '../sim/demand.js';
 
 /** Toolbar entries. Ids without a registered tool fall back to select. */
 const TOOL_BUTTONS: ReadonlyArray<{ id: string; label: string }> = [
@@ -40,6 +42,17 @@ export interface ToolModeButton {
   onSelect(): void;
 }
 
+/** The three demand bars, in RCI order. Colours match the zone overlay. */
+const DEMAND_BARS: ReadonlyArray<{
+  zone: 'r' | 'c' | 'i';
+  title: string;
+  color: number;
+}> = [
+  { zone: 'r', title: 'Residential demand', color: ZONE_COLORS.residential },
+  { zone: 'c', title: 'Commercial demand', color: ZONE_COLORS.commercial },
+  { zone: 'i', title: 'Industrial demand', color: ZONE_COLORS.industrial },
+];
+
 const SPEED_BUTTONS: ReadonlyArray<{ speed: GameSpeed; label: string; title: string }> = [
   { speed: 0, label: '‖', title: 'Pause (Space)' },
   { speed: 1, label: '1x', title: 'Normal speed (1)' },
@@ -59,16 +72,42 @@ export function formatPopulation(value: number): string {
   return Math.round(value).toLocaleString('en-US');
 }
 
+/** Format a monthly net as a signed delta, e.g. `+¤ 1,240 / mo`. */
+export function formatMonthlyNet(amount: number): string {
+  const rounded = Math.round(amount);
+  const sign = rounded < 0 ? '-' : '+';
+  return `${sign}¤ ${Math.abs(rounded).toLocaleString('en-US')} / mo`;
+}
+
+/**
+ * Live aggregates the HUD displays but does not own.
+ *
+ * `CityTotals` is derived and deliberately never saved (simulation.md §8), so
+ * the HUD cannot read it off `GameState` the way it reads money and population.
+ * It is supplied as a getter instead, which keeps the HUD pull-based and lets
+ * it render perfectly well with nothing attached.
+ */
+export interface HudFeeds {
+  /** The last daily recount, or `null` when no demand system is running. */
+  totals?: (() => Readonly<CityTotals> | null) | null;
+}
+
 export class Hud {
   private readonly root: HTMLElement;
   private readonly engine: Engine;
   private readonly state: GameState;
   private readonly tools: ToolManager;
 
+  private readonly feeds: HudFeeds;
+
   private readonly nameEl: HTMLElement;
   private readonly dateEl: HTMLElement;
   private readonly moneyEl: HTMLElement;
+  private readonly moneyDeltaEl: HTMLElement;
   private readonly populationEl: HTMLElement;
+  private readonly jobsEl: HTMLElement;
+  private readonly buildingsEl: HTMLElement;
+  private readonly demandBars = new Map<'r' | 'c' | 'i', HTMLElement>();
   private readonly debugEl: HTMLElement;
   private readonly hintEl: HTMLElement;
   private readonly modesEl: HTMLElement;
@@ -94,11 +133,20 @@ export class Hud {
    * @param engine Engine whose speed and stats are displayed and controlled.
    * @param state Game state read for city name, money and population.
    * @param tools Tool manager switched by the toolbar.
+   * @param feeds Derived aggregates the HUD shows but does not own. Optional:
+   *   without them the jobs sub-line simply reads as unknown.
    */
-  constructor(mount: HTMLElement, engine: Engine, state: GameState, tools: ToolManager) {
+  constructor(
+    mount: HTMLElement,
+    engine: Engine,
+    state: GameState,
+    tools: ToolManager,
+    feeds: HudFeeds = {},
+  ) {
     this.engine = engine;
     this.state = state;
     this.tools = tools;
+    this.feeds = feeds;
 
     this.root = el('div', 'hud');
 
@@ -113,9 +161,41 @@ export class Hud {
     const stats = el('div', 'hud-stats');
     const money = this.buildStat('Treasury', 'hud-stat__value--money');
     const population = this.buildStat('Population');
+    const buildings = this.buildStat('Buildings');
     this.moneyEl = money.value;
     this.populationEl = population.value;
-    stats.append(money.wrap, population.wrap);
+    this.buildingsEl = buildings.value;
+
+    // The last settled month's net, next to the treasury (simulation.md §6).
+    // Amber here is the actual anti-frustration feature: it fires while the
+    // player can still act, rather than after the balance has gone red.
+    this.moneyDeltaEl = el('div', 'hud-stat__sub hud-stat__sub--money');
+    money.wrap.append(this.moneyDeltaEl);
+
+    // Jobs filled / jobs total, the single most useful number for diagnosing
+    // why the demand bars look the way they do.
+    this.jobsEl = el('div', 'hud-stat__sub');
+    population.wrap.append(this.jobsEl);
+
+    stats.append(money.wrap, population.wrap, buildings.wrap);
+
+    // RCI demand: three bars reading the same scalars the growth tick spends.
+    // Kept as a readout, never a control (demand-growth.md: the bars are a
+    // readout of a simulated market, not a dial the player turns).
+    const demand = el('div', 'hud-demand');
+    for (const def of DEMAND_BARS) {
+      const track = el('div', 'hud-demand__track');
+      track.dataset.zone = def.zone;
+      track.title = def.title;
+      // A centre line, so a bar growing downward reads as negative demand at a
+      // glance rather than as an empty bar.
+      track.append(el('div', 'hud-demand__axis'));
+      const fill = el('div', 'hud-demand__fill');
+      fill.style.background = `#${def.color.toString(16).padStart(6, '0')}`;
+      track.append(fill);
+      this.demandBars.set(def.zone, fill);
+      demand.append(track);
+    }
 
     const speed = el('div', 'hud-speed');
     for (const def of SPEED_BUTTONS) {
@@ -127,7 +207,7 @@ export class Hud {
       this.speedButtons.set(def.speed, btn);
       speed.append(btn);
     }
-    status.append(stats, speed);
+    status.append(stats, demand, speed);
 
     // --- Bottom centre ---
     const toolbar = el('div', 'hud-panel hud-toolbar');
@@ -170,6 +250,20 @@ export class Hud {
     this.dateEl.textContent = `${formatDate(tick)} · ${formatTimeOfDay(tick)}`;
     this.moneyEl.textContent = formatMoney(this.state.money);
     this.populationEl.textContent = formatPopulation(this.state.population);
+    this.buildingsEl.textContent = formatPopulation(this.state.buildings.items.length);
+    this.updateBudget();
+    this.updateJobs();
+
+    // Demand is [-1,1] and is drawn from the centre (simulation.md §6): the
+    // upper half is what grows anything, the lower half is the city telling the
+    // player it already has more of that kind than it can fill.
+    for (const [zone, fill] of this.demandBars) {
+      const value = clampSigned(this.state.demand[zone]);
+      const magnitude = Math.abs(value) * 50;
+      fill.style.height = `${magnitude.toFixed(1)}%`;
+      fill.style.top = value >= 0 ? `${(50 - magnitude).toFixed(1)}%` : '50%';
+      fill.classList.toggle('is-negative', value < 0);
+    }
 
     const active = this.engine.getSpeed();
     for (const [speed, btn] of this.speedButtons) {
@@ -260,6 +354,50 @@ export class Hud {
     this.root.remove();
   }
 
+  /**
+   * Colour the treasury and show the last settled month's net.
+   *
+   * Red at `money < 0`, amber when the last settled month was a net loss
+   * (simulation.md §5 rule 5). Before the first settlement there is nothing
+   * honest to report, so the delta line stays empty rather than claiming zero.
+   */
+  private updateBudget(): void {
+    const economy = this.state.economy;
+    const broke = this.state.money < 0;
+    const settled = economy.monthsSettled > 0;
+    const losing = settled && economy.lastNet < 0;
+
+    this.moneyEl.classList.toggle('is-broke', broke);
+    this.moneyEl.classList.toggle('is-warning', !broke && losing);
+
+    this.moneyDeltaEl.textContent = settled ? formatMonthlyNet(economy.lastNet) : '';
+    this.moneyDeltaEl.classList.toggle('is-negative', losing);
+    this.moneyDeltaEl.title = settled
+      ? `Last month: tax ¤${Math.round(economy.lastMonth.tax)} · ` +
+        `road upkeep ¤${Math.round(economy.lastMonth.roadUpkeep)} · ` +
+        `construction ¤${Math.round(economy.lastMonth.construction)}`
+      : '';
+  }
+
+  /** Jobs filled over jobs total, or an em dash before the first recount. */
+  private updateJobs(): void {
+    const totals = this.feeds.totals?.() ?? null;
+    if (!totals) {
+      this.jobsEl.textContent = '';
+      this.jobsEl.title = '';
+      return;
+    }
+    const jobs = totals.jobsCommercial + totals.jobsIndustrial;
+    const filled = Math.round(totals.jobsFilled);
+    this.jobsEl.textContent =
+      jobs > 0
+        ? `${formatPopulation(filled)} / ${formatPopulation(jobs)} jobs`
+        : 'no jobs yet';
+    this.jobsEl.title =
+      `Unemployment ${(totals.unemployment * 100).toFixed(0)}% · ` +
+      `residential vacancy ${(totals.vacancyResidential * 100).toFixed(0)}%`;
+  }
+
   private buildStat(
     label: string,
     valueModifier = '',
@@ -341,6 +479,11 @@ export class Hud {
         break;
     }
   }
+}
+
+function clampSigned(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return value < -1 ? -1 : value > 1 ? 1 : value;
 }
 
 function el(tag: string, className: string): HTMLElement {

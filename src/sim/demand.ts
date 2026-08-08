@@ -22,6 +22,8 @@
 
 import { TICKS_PER_DAY } from '../core/time.js';
 import type { BuildingData, BuildingStore } from './buildings.js';
+import { Cadence } from './cadence.js';
+import { ECONOMY_TUNING } from './economy.js';
 import type { GameState, System } from './state.js';
 
 /** The three demand scalars, each in `[-1, 1]`. */
@@ -165,26 +167,46 @@ export function normalizeDemandState(input: unknown): DemandState {
 export class DemandSystem implements System, DemandSource {
   readonly id = 'demand';
 
+  /**
+   * Daily at the default interval, so the dispatcher skips this system on 39
+   * ticks out of 40 rather than calling it to be told "not yet" (OVERVIEW §6
+   * guardrail 7). A test that asks for a shorter interval falls back to the
+   * per-tick bucket, where the interval check below still governs.
+   */
+  readonly cadence: Cadence;
+
   private readonly store: BuildingStore;
-  private readonly state: DemandState;
+  private readonly host: { demand: DemandState };
+  private readonly treasury: { readonly money: number } | null;
   private readonly cityTotals = createCityTotals();
   private readonly interval: number;
 
   /**
    * @param store Building list the aggregates are computed from.
-   * @param state Demand scalars to advance in place — usually `GameState.demand`
-   *   so the bars survive a save round-trip.
+   * @param host Object owning the demand scalars, normally `GameState`. The
+   *   host is read on every access rather than cached, so replacing
+   *   `state.demand` wholesale (as loading a save does) is picked up
+   *   immediately — the same contract `RoadNetwork` has with `state.roads`.
    * @param interval Ticks between recounts. One in-game day by default.
+   * @param treasury Balance consulted for the broke damping of simulation.md
+   *   §5 rule 3. Omit to leave demand undamped.
    */
-  constructor(store: BuildingStore, state: DemandState, interval: number = TICKS_PER_DAY) {
+  constructor(
+    store: BuildingStore,
+    host: { demand: DemandState },
+    interval: number = TICKS_PER_DAY,
+    treasury: { readonly money: number } | null = null,
+  ) {
     this.store = store;
-    this.state = state;
+    this.host = host;
+    this.treasury = treasury;
     this.interval = Math.max(1, Math.floor(interval));
+    this.cadence = this.interval === TICKS_PER_DAY ? Cadence.Daily : Cadence.Tick;
   }
 
   /** The live demand scalars. */
   get demand(): Readonly<DemandState> {
-    return this.state;
+    return this.host.demand;
   }
 
   /** The cached aggregates from the last recount. */
@@ -246,7 +268,13 @@ export class DemandSystem implements System, DemandSource {
     t.residents = t.householdsFilled * tune.householdSize;
     t.workforce = t.residents * tune.workingAgeFraction;
     t.unemployment = clamp01((t.workforce - t.jobsFilled) / Math.max(t.workforce, 1));
-    t.vacancyResidential = clamp01(1 - t.householdsFilled / Math.max(t.households, 1));
+    // A city with no housing has nothing standing empty. Dividing by
+    // `max(households, 1)` would report 100% vacancy for an empty city, which
+    // reads as "stop building homes" at exactly the moment the player needs the
+    // opposite — and it is the shape the vacancy brake below is most sensitive
+    // to.
+    t.vacancyResidential =
+      t.households > 0 ? clamp01(1 - t.householdsFilled / t.households) : 0;
     t.goodsSupply = industrialFilled * tune.goodsPerIndustrialJob;
     t.commercialThroughput = commercialFilled * tune.goodsPerCommercialJob;
     t.goodsDemand = t.residents * tune.goodsPerResident;
@@ -315,17 +343,33 @@ export class DemandSystem implements System, DemandSource {
 
     // Bootstrap floor, applied *after* vacancy suppression so an empty city
     // always starts. Faded linearly rather than cut off, or the city stalls
-    // hard at the threshold.
+    // hard at the threshold — and switched off entirely once faded, or
+    // `max(raw, 0)` would silently become a permanent floor at zero and no bar
+    // could ever go negative.
     const fade = clamp01(1 - t.residents / Math.max(tune.seedPopulation, 1));
     const seed = tune.seedDemand;
-    const targetR = Math.max(clampSigned(rawR), seed.r * fade);
-    const targetC = Math.max(clampSigned(rawC), seed.c * fade);
-    const targetI = Math.max(clampSigned(rawI), seed.i * fade);
+    let targetR = seeded(clampSigned(rawR), seed.r, fade);
+    let targetC = seeded(clampSigned(rawC), seed.c, fade);
+    let targetI = seeded(clampSigned(rawI), seed.i, fade);
+
+    // Broke damping (simulation.md §5 rule 3): an overdrawn treasury damps the
+    // bars as well as the growth roll, so the stall is visible before the player
+    // works out why nothing is being built. Positive demand only — being broke
+    // must not manufacture negative demand, and the damping is a brake, never a
+    // wall: the bars stay above zero and the city recovers on its own once tax
+    // income clears the overdraft.
+    if (this.treasury !== null && this.treasury.money < 0) {
+      const damp = ECONOMY_TUNING.brokeDemandDamping;
+      if (targetR > 0) targetR *= damp;
+      if (targetC > 0) targetC *= damp;
+      if (targetI > 0) targetI *= damp;
+    }
 
     const s = tune.smoothing;
-    this.state.r = clampSigned(this.state.r + (targetR - this.state.r) * s);
-    this.state.c = clampSigned(this.state.c + (targetC - this.state.c) * s);
-    this.state.i = clampSigned(this.state.i + (targetI - this.state.i) * s);
+    const d = this.host.demand;
+    d.r = clampSigned(d.r + (targetR - d.r) * s);
+    d.c = clampSigned(d.c + (targetC - d.c) * s);
+    d.i = clampSigned(d.i + (targetI - d.i) * s);
   }
 }
 
@@ -350,6 +394,19 @@ export class FixedDemand implements DemandSource {
     if (demand.c !== undefined) this.demand.c = clampSigned(demand.c);
     if (demand.i !== undefined) this.demand.i = clampSigned(demand.i);
   }
+}
+
+/**
+ * Raise a raw demand value to the fading bootstrap floor.
+ *
+ * Once the fade reaches zero the floor is gone entirely rather than collapsing
+ * to `max(raw, 0)`: a grown city must be able to report negative demand, which
+ * is what tells the player they have overzoned.
+ */
+function seeded(raw: number, seedValue: number, fade: number): number {
+  if (fade <= 0) return raw;
+  const floor = seedValue * fade;
+  return raw < floor ? floor : raw;
 }
 
 function clamp01(value: number): number {

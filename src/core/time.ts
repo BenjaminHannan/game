@@ -18,6 +18,15 @@ export const MONTHS_PER_YEAR = 12;
 /** Days in an in-game year. */
 export const DAYS_PER_YEAR = DAYS_PER_MONTH * MONTHS_PER_YEAR;
 
+/**
+ * Simulation ticks in one in-game month (60 real seconds at speed 1).
+ *
+ * The monthly cadence bucket in `docs/research/simulation.md` §1 is derived from
+ * this, so retuning the calendar retunes the economy's settlement period without
+ * any other edit.
+ */
+export const TICKS_PER_MONTH = TICKS_PER_DAY * DAYS_PER_MONTH;
+
 /** Calendar year at tick 0. */
 export const START_YEAR = 2026;
 
@@ -68,12 +77,34 @@ export function hourOfDay(tick: number): number {
 
 /** Decode a tick count into a full in-game calendar date. */
 export function dateFromTick(tick: number): GameDate {
+  return writeDate(tick, {
+    year: START_YEAR,
+    month: 0,
+    day: 1,
+    totalDays: 0,
+    hourOfDay: 0,
+  });
+}
+
+/**
+ * Decode a tick into an *existing* {@link GameDate}, in place.
+ *
+ * The tick loop needs the date every tick and must not allocate
+ * (`docs/research/cs2/OVERVIEW.md` §6 guardrail 5), so the simulation keeps one
+ * date object and rewrites it. {@link dateFromTick} is this function plus a
+ * fresh object.
+ *
+ * @returns The same object that was passed in.
+ */
+export function writeDate(tick: number, out: GameDate): GameDate {
   const totalDays = Math.floor(tick / TICKS_PER_DAY);
-  const year = START_YEAR + Math.floor(totalDays / DAYS_PER_YEAR);
   const dayOfYear = ((totalDays % DAYS_PER_YEAR) + DAYS_PER_YEAR) % DAYS_PER_YEAR;
-  const month = Math.floor(dayOfYear / DAYS_PER_MONTH);
-  const day = (dayOfYear % DAYS_PER_MONTH) + 1;
-  return { year, month, day, totalDays, hourOfDay: hourOfDay(tick) };
+  out.year = START_YEAR + Math.floor(totalDays / DAYS_PER_YEAR);
+  out.month = Math.floor(dayOfYear / DAYS_PER_MONTH);
+  out.day = (dayOfYear % DAYS_PER_MONTH) + 1;
+  out.totalDays = totalDays;
+  out.hourOfDay = hourOfDay(tick);
+  return out;
 }
 
 /** Format a tick as a short date string, e.g. `"Jan 12, 2026"`. */

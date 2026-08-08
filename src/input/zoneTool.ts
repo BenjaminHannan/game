@@ -34,6 +34,7 @@ import {
   type ZonePaint,
   type ZoningState,
 } from '../sim/zoning.js';
+import type { LedgerCategory } from '../sim/economy.js';
 
 /** Largest brush radius, in cells either side of the centre (9 x 9). */
 export const MAX_BRUSH_RADIUS = 4;
@@ -43,9 +44,16 @@ export interface ZonePreviewTarget {
   setZonePreview(cells: readonly CellKey[], paint: ZonePaint): void;
 }
 
-/** Treasury the tool charges zoning to. */
+/**
+ * Treasury the tool charges zoning to.
+ *
+ * As with `RoadBudget`, a bare `{ money }` works for headless tests, and a
+ * {@link Ledger} is used through `spend` when one is supplied, so every real
+ * session keeps the single-funnel invariant of `simulation.md` §4.
+ */
 export interface ZoneBudget {
   money: number;
+  spend?(amount: number, category: LedgerCategory): boolean;
 }
 
 /** What the tool is currently doing, for HUD hints. */
@@ -305,7 +313,7 @@ export class ZoneTool extends BaseTool {
     }
 
     const changed = this.zoning.paintCells(cells, paint);
-    if (this.budget) this.budget.money -= changed * perCell;
+    this.charge(changed * perCell);
 
     this.painting = false;
     this.stroke.clear();
@@ -336,6 +344,19 @@ export class ZoneTool extends BaseTool {
     this.beginStroke(x1, z1, paint ?? this.activePaint);
     this.extendStroke(x2, z2);
     return this.commitStroke();
+  }
+
+  /**
+   * Debit the treasury for a committed stroke.
+   *
+   * The stroke was already truncated to what the balance covers, so this cannot
+   * legitimately fail; it is written as a funnel call rather than a subtraction
+   * so that the ledger, not the tool, owns every treasury movement.
+   */
+  private charge(amount: number): void {
+    if (!this.budget || amount <= 0) return;
+    if (this.budget.spend) this.budget.spend(amount, 'construction');
+    else this.budget.money -= amount;
   }
 
   /** Fee per cell for the active brush. De-zoning is free. */

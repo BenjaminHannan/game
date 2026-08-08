@@ -8,6 +8,21 @@
 
 import type { SaveManager, SaveProvider } from '../core/save.js';
 import {
+  DAYS_PER_MONTH,
+  TICKS_PER_DAY,
+  TICKS_PER_MONTH,
+  writeDate,
+  type GameDate,
+} from '../core/time.js';
+import { Cadence, type System, type TickContext } from './cadence.js';
+import {
+  CityLedger,
+  cloneEconomyState,
+  createEconomyState,
+  normalizeEconomyState,
+  type EconomyState,
+} from './economy.js';
+import {
   RoadNetwork,
   cloneRoadNetworkData,
   createRoadNetworkData,
@@ -24,6 +39,8 @@ import {
   type BuildingsData,
 } from './buildings.js';
 import { createDemandState, normalizeDemandState, type DemandState } from './demand.js';
+
+export { Cadence, type System, type TickContext } from './cadence.js';
 
 /** Default name for a new city. */
 export const DEFAULT_CITY_NAME = 'Riverbend';
@@ -63,6 +80,12 @@ export interface GameState {
   buildings: BuildingsData;
   /** The three RCI demand scalars, advanced daily by the demand system. */
   demand: DemandState;
+  /**
+   * Tax rates and the monthly ledger. `money` itself stays a top-level field so
+   * every existing reader (the HUD, the build tools) keeps working; this branch
+   * holds everything *about* money that the ledger owns.
+   */
+  economy: EconomyState;
 }
 
 /** Create a fresh game state. */
@@ -77,19 +100,16 @@ export function createGameState(seed: number): GameState {
     zoning: createZoningSaveData(),
     buildings: createBuildingsData(),
     demand: createDemandState(),
+    economy: createEconomyState(),
   };
 }
 
-/** One unit of simulation logic, run once per tick in registration order. */
-export interface System {
-  /** Stable identifier, unique within a {@link Simulation}. */
-  readonly id: string;
-  /**
-   * Advance this system by one tick.
-   * @param state Mutable game state.
-   * @param tick Absolute tick index being simulated.
-   */
-  step(state: GameState, tick: number): void;
+/** The writable view of a {@link TickContext} the dispatcher rewrites in place. */
+interface MutableTickContext {
+  days: number;
+  monthBoundary: boolean;
+  dayBoundary: boolean;
+  readonly date: GameDate;
 }
 
 /**
@@ -111,7 +131,37 @@ export class Simulation implements SaveProvider<GameState> {
   /** Editing surface over {@link GameState.buildings}. */
   readonly buildings: BuildingStore;
 
+  /**
+   * The one funnel every treasury movement goes through (simulation.md §4).
+   *
+   * Nothing else may write {@link GameState.money}; the build tools take this
+   * object, and it is what makes "unaffordable" a rejected plan rather than an
+   * overdraft.
+   */
+  readonly ledger: CityLedger;
+
   private readonly systems: System[] = [];
+
+  /**
+   * The three cadence contexts, preallocated and rewritten in place.
+   *
+   * One object per bucket rather than one per invocation, because the tick loop
+   * must allocate nothing (OVERVIEW §6 guardrail 5). They share `date`, which is
+   * itself rewritten in place once per tick.
+   */
+  private readonly date: GameDate = {
+    year: 0,
+    month: 0,
+    day: 1,
+    totalDays: 0,
+    hourOfDay: 0,
+  };
+
+  private readonly contexts: MutableTickContext[] = [
+    { days: 1 / TICKS_PER_DAY, monthBoundary: false, dayBoundary: false, date: this.date },
+    { days: 1, monthBoundary: false, dayBoundary: true, date: this.date },
+    { days: DAYS_PER_MONTH, monthBoundary: true, dayBoundary: true, date: this.date },
+  ];
 
   /**
    * @param seed Seed for the new game state.
@@ -123,6 +173,7 @@ export class Simulation implements SaveProvider<GameState> {
     this.roads = new RoadNetwork(this.state, roadOptions);
     this.zoning = new ZoningState({ network: this.roads });
     this.buildings = new BuildingStore(this.state, this.zoning);
+    this.ledger = new CityLedger(this.state);
   }
 
   /** Append a system to the end of the pipeline. */
@@ -139,12 +190,40 @@ export class Simulation implements SaveProvider<GameState> {
   }
 
   /**
-   * Advance the simulation by exactly one tick, running every system in order.
+   * Advance the simulation by exactly one tick, running every system whose
+   * cadence bucket this tick belongs to, in registration order.
+   *
+   * Bucket membership is a pure function of the tick index (simulation.md §1),
+   * so stepping 1 200 ticks in one burst and in 1 200 single calls produce
+   * identical state, and the player's speed setting can never change what a
+   * tick does.
+   *
    * @param tick Absolute tick index supplied by the engine.
    */
   step(tick: number): void {
     this.state.tick = tick;
-    for (const system of this.systems) system.step(this.state, tick);
+
+    const dayBoundary = tick % TICKS_PER_DAY === 0;
+    const monthBoundary = tick % TICKS_PER_MONTH === 0;
+    writeDate(tick, this.date);
+
+    // Only the per-tick context's boundary flags vary; the daily and monthly
+    // contexts are constant by construction.
+    const perTick = this.contexts[Cadence.Tick] as MutableTickContext;
+    perTick.dayBoundary = dayBoundary;
+    perTick.monthBoundary = monthBoundary;
+
+    for (const system of this.systems) {
+      const cadence = system.cadence ?? Cadence.Tick;
+      if (cadence === Cadence.Daily && !dayBoundary) continue;
+      if (cadence === Cadence.Monthly && !monthBoundary) continue;
+      system.step(this.state, tick, this.contexts[cadence] as TickContext);
+    }
+  }
+
+  /** The cadence context for a bucket, as the last `step` left it. */
+  context(cadence: Cadence): Readonly<TickContext> {
+    return this.contexts[cadence] as TickContext;
   }
 
   /** Register this simulation with a save manager. */
@@ -162,6 +241,7 @@ export class Simulation implements SaveProvider<GameState> {
       zoning: { zoneRuns: [...this.state.zoning.zoneRuns] },
       buildings: cloneBuildingsData(this.state.buildings),
       demand: { ...this.state.demand },
+      economy: cloneEconomyState(this.state.economy),
     };
   }
 
@@ -172,7 +252,19 @@ export class Simulation implements SaveProvider<GameState> {
     const incoming = data as Partial<GameState> | null | undefined;
     const zoningBranch = incoming?.zoning;
     const buildingBranch = incoming?.buildings;
+    const demandBranch = incoming?.demand;
+    const economyBranch = incoming?.economy;
     Object.assign(this.state, data);
+    // Scalars are repaired, not trusted (simulation.md §8): a hand-edited save
+    // with NaN money must load as something playable, and `money` in particular
+    // has an explicit invariant that it is never non-finite.
+    this.state.seed = finiteOr(this.state.seed, 0);
+    this.state.money = finiteOr(this.state.money, STARTING_MONEY);
+    this.state.population = Math.max(0, Math.round(finiteOr(this.state.population, 0)));
+    this.state.tick = Math.max(0, Math.floor(finiteOr(this.state.tick, 0)));
+    if (typeof this.state.cityName !== 'string' || this.state.cityName.length === 0) {
+      this.state.cityName = DEFAULT_CITY_NAME;
+    }
     // Saves written before roads existed, or hand-edited ones, are repaired
     // rather than trusted; renderers are told to rebuild from the new graph.
     this.state.roads = normalizeRoadNetworkData(this.state.roads);
@@ -187,8 +279,16 @@ export class Simulation implements SaveProvider<GameState> {
     // are kept and left stranded: the growth system's viability scan will
     // condemn them over the next few ticks, which is the correct behaviour.
     this.buildings.load(normalizeBuildingsData(buildingBranch));
-    this.state.demand = normalizeDemandState(this.state.demand);
+    this.state.demand = normalizeDemandState(demandBranch);
+    // A save from any earlier build simply lacks this branch and normalizes to
+    // a fresh ledger at the default tax rate — additive migration, no version
+    // gate (simulation.md §8).
+    this.state.economy = normalizeEconomyState(economyBranch);
   }
+}
+
+function finiteOr(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
 /**

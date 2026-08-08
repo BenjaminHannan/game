@@ -21,7 +21,22 @@ import { Simulation, ZoningSystem } from '../src/sim/state.js';
 import { RoadRenderer, SURFACE_LIFT } from '../src/render/roadMesh.js';
 import { ZoneOverlay, ZONE_LIFT } from '../src/render/zoneOverlay.js';
 import { ZONE_COLORS, cellAt } from '../src/sim/zoning.js';
+import { DemandSystem } from '../src/sim/demand.js';
+import { GrowthSystem } from '../src/sim/growth.js';
+import { BUILDING_LIFT, BuildingRenderer } from '../src/render/buildingMesh.js';
+import { VehicleRenderer, VEHICLE_VARIANTS } from '../src/render/vehicles.js';
+import { TrafficSystem } from '../src/sim/traffic.js';
 import { Hud } from '../src/ui/hud.js';
+
+/** First position on the generated terrain where a 200 m road is buildable. */
+function buildableStart(sim: Simulation): [number, number] {
+  for (let x = -600; x <= 600; x += 64) {
+    for (let z = -600; z <= 600; z += 64) {
+      if (sim.roads.plan(x, z, x + 400, z).ok) return [x, z];
+    }
+  }
+  throw new Error('no buildable road position on this terrain');
+}
 
 describe('boot', () => {
   let terrain: Terrain;
@@ -254,6 +269,236 @@ describe('boot', () => {
     overlay.dispose();
     hud.dispose();
     mount.remove();
+  });
+
+  it('grows and draws buildings through the whole tick pipeline', () => {
+    const sim = new Simulation(20260101, { sampler: terrain, bounds: WORLD_HALF });
+    sim.addSystem(new ZoningSystem(sim.zoning));
+    const demand = new DemandSystem(sim.buildings, sim.state);
+    sim.addSystem(demand);
+    const growth = new GrowthSystem({
+      zoning: sim.zoning,
+      buildings: sim.buildings,
+      demand,
+      roads: sim.roads,
+      seed: 20260101,
+    });
+    sim.addSystem(growth);
+    const buildings = new BuildingRenderer(sim.buildings, terrain);
+
+    // Lay a road on real terrain, then paint both of its frontage strips.
+    let start: [number, number] | null = null;
+    for (let x = -600; x <= 600 && !start; x += 64) {
+      for (let z = -600; z <= 600 && !start; z += 64) {
+        if (sim.roads.plan(x, z, x + 300, z).ok) start = [x, z];
+      }
+    }
+    const [sx, sz] = start as [number, number];
+    sim.roads.placeSegment(sx, sz, sx + 300, sz);
+    sim.step(0);
+
+    const zoneTool = new ZoneTool({ zoning: sim.zoning, budget: sim.state });
+    zoneTool.paintStroke(sx + 8, sz + 14, sx + 290, sz + 14, 'residential');
+    zoneTool.paintStroke(sx + 8, sz - 14, sx + 290, sz - 14, 'commercial');
+    expect(sim.zoning.counts().zoned).toBeGreaterThan(20);
+
+    // Two in-game days is plenty for the demand bootstrap and many growth passes.
+    for (let tick = 1; tick <= 200; tick++) sim.step(tick);
+
+    expect(sim.buildings.count).toBeGreaterThan(0);
+    expect(sim.state.population).toBeGreaterThan(0);
+    expect(sim.state.demand.r).toBeGreaterThan(0);
+
+    buildings.update(sim.state.tick);
+    expect(buildings.drawnBuildings).toBe(sim.buildings.count);
+    // The whole city is a handful of instanced draw calls (guardrail 11).
+    expect(buildings.drawCalls).toBeGreaterThan(0);
+    expect(buildings.drawCalls).toBeLessThanOrEqual(4);
+
+    // Pads sit on the terrain under the lot centre, not at y = 0.
+    const base = buildings.group.getObjectByName('Buildings:base') as THREE.InstancedMesh;
+    const matrix = new THREE.Matrix4();
+    const position = new THREE.Vector3();
+    for (let i = 0; i < base.count; i += 3) {
+      base.getMatrixAt(i, matrix);
+      position.setFromMatrixPosition(matrix);
+      expect(position.y).toBeCloseTo(terrain.heightAt(position.x, position.z) + BUILDING_LIFT, 3);
+    }
+
+    buildings.dispose();
+  });
+
+  it('shows demand bars and a building count in the HUD', () => {
+    const mount = document.createElement('div');
+    document.body.append(mount);
+    const sim = new Simulation(5);
+    const tools = new ToolManager();
+    tools.register(new SelectTool());
+    const hud = new Hud(mount, new Engine(), sim.state, tools);
+
+    sim.state.demand.r = 0.5;
+    sim.state.demand.c = -1;
+    sim.state.buildings.items.push({
+      id: 1,
+      zone: 'residential',
+      cell: 0,
+      w: 1,
+      d: 1,
+      facing: 0,
+      level: 1,
+      seed: 1,
+      capacity: 2,
+      occupancy: 0,
+      bornTick: 0,
+    });
+    hud.update(100);
+
+    const bars = mount.querySelectorAll('.hud-demand__track');
+    expect(bars).toHaveLength(3);
+    const fill = (zone: string): HTMLElement =>
+      mount.querySelector(
+        `.hud-demand__track[data-zone="${zone}"] .hud-demand__fill`,
+      ) as HTMLElement;
+    // Bars grow from the centre line (simulation.md §6), so a full bar is half
+    // the track and positive demand climbs upward from 50%.
+    expect(fill('r').style.height).toBe('25%');
+    expect(fill('r').style.top).toBe('25%');
+    expect(fill('r').classList.contains('is-negative')).toBe(false);
+    // Negative demand hangs below the centre line instead of vanishing.
+    expect(fill('c').style.height).toBe('50%');
+    expect(fill('c').style.top).toBe('50%');
+    expect(fill('c').classList.contains('is-negative')).toBe(true);
+    expect(mount.querySelectorAll('.hud-stat')).toHaveLength(3);
+
+    hud.dispose();
+    mount.remove();
+  });
+
+  it('shows the monthly net, the jobs sub-line and the broke colouring', () => {
+    const mount = document.createElement('div');
+    document.body.append(mount);
+    const sim = new Simulation(9, { sampler: terrain, bounds: WORLD_HALF });
+    const tools = new ToolManager();
+    tools.register(new SelectTool());
+    const demand = new DemandSystem(sim.buildings, sim.state);
+    const hud = new Hud(mount, new Engine(), sim.state, tools, {
+      totals: () => demand.totals,
+    });
+
+    const moneyEl = mount.querySelector('.hud-stat__value--money') as HTMLElement;
+    const deltaEl = mount.querySelector('.hud-stat__sub--money') as HTMLElement;
+    const jobsEl = mount.querySelector('.hud-stat .hud-stat__sub:not(.hud-stat__sub--money)') as
+      HTMLElement;
+
+    // Before the first settlement there is nothing honest to report.
+    hud.update(100);
+    expect(deltaEl.textContent).toBe('');
+    expect(jobsEl.textContent).toBe('no jobs yet');
+    expect(moneyEl.classList.contains('is-warning')).toBe(false);
+
+    // A losing month turns the treasury amber while the balance is still fine.
+    sim.ledger.pay(400, 'roadUpkeep');
+    sim.ledger.earn(100, 'tax');
+    sim.ledger.settle();
+    hud.update(100);
+    expect(deltaEl.textContent).toBe('-¤ 300 / mo');
+    expect(moneyEl.classList.contains('is-warning')).toBe(true);
+    expect(moneyEl.classList.contains('is-broke')).toBe(false);
+
+    // Overdrawn turns it red, which outranks the amber warning.
+    sim.state.money = -1;
+    hud.update(100);
+    expect(moneyEl.classList.contains('is-broke')).toBe(true);
+    expect(moneyEl.classList.contains('is-warning')).toBe(false);
+    expect(moneyEl.textContent).toBe('-¤ 1');
+
+    hud.dispose();
+    mount.remove();
+  });
+
+  it('draws traffic as pooled instanced vehicles over the road graph', () => {
+    const sim = new Simulation(20260101, { bounds: WORLD_HALF });
+    sim.roads.setSampler(terrain);
+    const [sx, sz] = buildableStart(sim);
+    sim.roads.placeSegment(sx, sz, sx + 200, sz);
+    sim.roads.placeSegment(sx + 200, sz, sx + 400, sz);
+
+    // A deliberately small world half, so the far node counts as an outside
+    // connection and supplies flow without waiting for a city to grow.
+    const traffic = new TrafficSystem({
+      roads: sim.roads,
+      buildings: sim.buildings,
+      zoning: sim.zoning,
+      worldHalf: Math.abs(sx + 400) + 8,
+    });
+    traffic.assign();
+    expect(traffic.totalFlow).toBeGreaterThan(0);
+
+    const vehicles = new VehicleRenderer({ traffic, seed: 42 });
+    expect(vehicles.group.children).toHaveLength(VEHICLE_VARIANTS.length);
+
+    for (let frame = 0; frame < 40; frame++) {
+      vehicles.update(1 / 60, sx + 200, sz, 300);
+    }
+    expect(vehicles.count).toBeGreaterThan(0);
+    expect(vehicles.count).toBeLessThanOrEqual(vehicles.target);
+    // Three draw calls at most, whatever the fleet size.
+    expect(vehicles.drawCalls).toBeLessThanOrEqual(VEHICLE_VARIANTS.length);
+
+    // Every instance sits on the road ribbon rather than in the terrain.
+    const matrix = new THREE.Matrix4();
+    const position = new THREE.Vector3();
+    let checked = 0;
+    for (const child of vehicles.group.children) {
+      const mesh = child as THREE.InstancedMesh;
+      for (let i = 0; i < mesh.count; i++) {
+        mesh.getMatrixAt(i, matrix);
+        position.setFromMatrixPosition(matrix);
+        expect(position.y).toBeGreaterThan(terrain.heightAt(position.x, position.z) - 1);
+        checked++;
+      }
+    }
+    expect(checked).toBe(vehicles.count);
+
+    // Hiding the fleet empties the pool and costs no draw calls at all.
+    vehicles.setVisible(false);
+    expect(vehicles.count).toBe(0);
+    expect(vehicles.drawCalls).toBe(0);
+    vehicles.dispose();
+  });
+
+  it('tints the carriageway from the flow field without rebuilding it', () => {
+    const sim = new Simulation(20260101, { bounds: WORLD_HALF });
+    sim.roads.setSampler(terrain);
+    const [sx, sz] = buildableStart(sim);
+    const edge = sim.roads.placeSegment(sx, sz, sx + 200, sz) as { id: number };
+    const roads = new RoadRenderer(sim.roads, terrain);
+    const traffic = new TrafficSystem({
+      roads: sim.roads,
+      buildings: sim.buildings,
+      zoning: sim.zoning,
+      worldHalf: Math.abs(sx + 200) + 8,
+    });
+    for (let i = 0; i < 30; i++) traffic.assign();
+    expect(traffic.congestionOf(edge.id)).toBeGreaterThan(0);
+
+    const surface = roads.group.children.find(
+      (child) => child.name === 'RoadSurfaces',
+    ) as THREE.Mesh;
+    const colors = surface.geometry.getAttribute('color');
+    expect(colors).toBeDefined();
+    const geometry = surface.geometry;
+
+    roads.setTrafficView(true);
+    roads.updateCongestion(traffic);
+    const tinted = (colors.array as Float32Array).slice();
+    roads.updateCongestion(null);
+    const plain = colors.array as Float32Array;
+    expect(tinted).not.toEqual(plain);
+    // The tint is a buffer write: the geometry object itself never moved.
+    expect(surface.geometry).toBe(geometry);
+
+    roads.dispose();
   });
 
   it('keeps the camera target inside the world when panning hard', () => {

@@ -56,10 +56,36 @@ export interface RoadClass {
   readonly totalWidth: number;
   /** Paved carriageway width in metres. */
   readonly pavedWidth: number;
-  /** Displayed speed limit. */
+  /** Displayed speed limit, in km/h. */
   readonly speedLimit: number;
+  /**
+   * Lanes carrying traffic, both directions summed (traffic.md §3).
+   *
+   * v1 flow is directionless — one number per edge — so capacity is likewise a
+   * single both-ways figure. When flow widens to per-direction, this splits with
+   * it and nothing else has to move.
+   */
+  readonly lanes: number;
+  /**
+   * Vehicles per hour per lane at the point where flow starts to degrade
+   * (traffic.md §3). `capacity = lanes * laneCapacity`.
+   *
+   * Internally consistent rather than sourced: a gravel lane carries less than a
+   * paved one, which is what gives the road hierarchy meaning in the assignment
+   * pass without a single special case.
+   */
+  readonly laneCapacity: number;
   /** Construction cost per metre (roads.md: ~2 per metre for a two-lane road). */
   readonly costPerMetre: number;
+  /**
+   * Maintenance charged per metre per in-game month (simulation.md §4).
+   *
+   * 0.16 for a two-lane road follows the ~16-per-100 m figure in the roads
+   * research; gravel is cheaper to keep as well as to lay. A road pays back its
+   * own construction cost in upkeep after about a year, which is the ratio that
+   * makes "do not pave the whole map" a real decision.
+   */
+  readonly upkeepPerMetre: number;
   /**
    * Whether this class emits zoning cells along its frontage
    * (zoning-growth.md §2). Both v1 classes do; the later highway tier will not,
@@ -77,7 +103,10 @@ export const ROAD_CLASSES: Readonly<Record<RoadClassId, RoadClass>> = {
     totalWidth: 12,
     pavedWidth: 7,
     speedLimit: 30,
+    lanes: 2,
+    laneCapacity: 500,
     costPerMetre: 1,
+    upkeepPerMetre: 0.1,
     zonable: true,
   },
   small: {
@@ -86,13 +115,26 @@ export const ROAD_CLASSES: Readonly<Record<RoadClassId, RoadClass>> = {
     totalWidth: 16,
     pavedWidth: 10,
     speedLimit: 40,
+    lanes: 2,
+    laneCapacity: 800,
     costPerMetre: 2,
+    upkeepPerMetre: 0.16,
     zonable: true,
   },
 };
 
 /** Road class used when none is specified. */
 export const DEFAULT_ROAD_CLASS: RoadClassId = 'small';
+
+/** Every road class id, in catalogue order. Iterating this never allocates. */
+export const ROAD_CLASS_IDS: readonly RoadClassId[] = ['gravel', 'small'];
+
+/**
+ * Share of an edge's original construction cost returned when it is bulldozed
+ * (simulation.md §4). Deliberately stingy, matching the post-Economy-2.0 spirit:
+ * demolition is a correction, not a savings account.
+ */
+export const BULLDOZE_REFUND_FRACTION = 0.25;
 
 /** A network node: an endpoint or junction, in world metres. */
 export interface RoadNodeData {
@@ -116,6 +158,13 @@ export interface RoadEdgeData {
   roadClass: RoadClassId;
   /** Horizontal length in metres, cached at placement time. */
   length: number;
+  /**
+   * What the player actually paid for this segment.
+   *
+   * Stored rather than re-derived so a later class swap or price change cannot
+   * retroactively alter a refund (simulation.md §4).
+   */
+  cost: number;
 }
 
 /** Serializable form of a whole road network. */
@@ -239,12 +288,20 @@ export function normalizeRoadNetworkData(input: unknown): RoadNetworkData {
       const a = out.nodes.find((n) => n.id === from) as RoadNodeData;
       const b = out.nodes.find((n) => n.id === to) as RoadNodeData;
       edgeIds.add(id);
+      const span = isFiniteNumber(length) ? length : Math.hypot(b.x - a.x, b.z - a.z);
+      const { cost } = e as RoadEdgeData;
       out.edges.push({
         id,
         from,
         to,
         roadClass: cls,
-        length: isFiniteNumber(length) ? length : Math.hypot(b.x - a.x, b.z - a.z),
+        length: span,
+        // A save written before edges recorded their price simply lacks the
+        // field; re-derive it at the current catalogue price rather than
+        // dropping an otherwise-valid road.
+        cost: isFiniteNumber(cost)
+          ? Math.max(0, cost)
+          : Math.round(span * ROAD_CLASSES[cls].costPerMetre),
       });
     }
   }
@@ -280,6 +337,18 @@ export class RoadNetwork {
   private bounds: number;
 
   /**
+   * Centreline length per class, and the revision it was computed for.
+   *
+   * simulation.md §7 asks for exactly this: a lazy cache keyed on `revision`
+   * rather than incremental bookkeeping in `commit`/`removeEdge`, because one
+   * code path self-heals after a `clear()` or a save load. Monthly upkeep then
+   * costs one integer compare in the common case instead of a walk over every
+   * edge in the city.
+   */
+  private readonly lengths: Record<RoadClassId, number> = { gravel: 0, small: 0 };
+  private lengthsRevision = -1;
+
+  /**
    * @param host Object owning the serializable network, typically `GameState`.
    * @param options Terrain sampler and world bounds.
    */
@@ -311,8 +380,42 @@ export class RoadNetwork {
 
   /** Total centreline length of the network, in metres. */
   get totalLength(): number {
+    const byClass = this.lengthByClass;
     let sum = 0;
-    for (const e of this.host.roads.edges) sum += e.length;
+    for (const id of ROAD_CLASS_IDS) sum += byClass[id];
+    return sum;
+  }
+
+  /**
+   * Centreline length per road class, in metres.
+   *
+   * The same object is returned every call and is recomputed only when the
+   * network has changed since the last read, so a monthly upkeep settlement in
+   * an unchanged city is free.
+   */
+  get lengthByClass(): Readonly<Record<RoadClassId, number>> {
+    if (this.lengthsRevision !== this.revisionCounter) {
+      for (const id of ROAD_CLASS_IDS) this.lengths[id] = 0;
+      const edges = this.host.roads.edges;
+      for (let i = 0; i < edges.length; i++) {
+        const e = edges[i] as RoadEdgeData;
+        this.lengths[e.roadClass] += e.length;
+      }
+      this.lengthsRevision = this.revisionCounter;
+    }
+    return this.lengths;
+  }
+
+  /**
+   * Total maintenance this network charges per in-game month.
+   *
+   * Read by the economy system's monthly settlement; kept here because it is a
+   * property of the graph and its catalogue, not of the treasury.
+   */
+  get upkeepPerMonth(): number {
+    const byClass = this.lengthByClass;
+    let sum = 0;
+    for (const id of ROAD_CLASS_IDS) sum += byClass[id] * ROAD_CLASSES[id].upkeepPerMetre;
     return sum;
   }
 
@@ -485,6 +588,7 @@ export class RoadNetwork {
       to,
       roadClass: plan.roadClass,
       length: plan.length,
+      cost: plan.cost,
     };
     this.host.roads.edges.push(edge);
     this.revisionCounter++;

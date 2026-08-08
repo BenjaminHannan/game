@@ -21,6 +21,7 @@ import {
   type RoadNetwork,
   type RoadPlan,
 } from '../sim/roads.js';
+import { congestionColor, type TrafficField } from '../sim/traffic.js';
 
 /** Height in metres the verge ribbon sits above the ground. */
 export const VERGE_LIFT = 0.22;
@@ -47,6 +48,16 @@ export const PREVIEW_VALID_COLOR = 0x53d67f;
 export const PREVIEW_INVALID_COLOR = 0xe1544a;
 
 /**
+ * How dark a fully jammed road gets while the traffic info view is *off*.
+ *
+ * traffic.md §7 asks for the overlay to be a toggle with a subtle always-on
+ * variant worth prototyping: a slight darkening reads as traffic grime rather
+ * than shouting, and it means a jam is faintly visible before the player thinks
+ * to look for it.
+ */
+export const CONGESTION_GRIME = 0.28;
+
+/**
  * Accumulates draped triangles into a single indexed geometry.
  *
  * Exported so tests and future networks (rails, paths) can reuse the draping
@@ -66,6 +77,17 @@ export class RibbonBuilder {
   /** True when nothing has been added yet. */
   get isEmpty(): boolean {
     return this.indices.length === 0;
+  }
+
+  /**
+   * Vertices written so far.
+   *
+   * Read either side of an `addSegment` call to record the range one edge owns,
+   * which is what lets congestion tinting rewrite a colour attribute in place
+   * instead of regenerating the merged geometry (traffic.md §7 and §10).
+   */
+  get vertexCount(): number {
+    return this.positions.length / 3;
   }
 
   /**
@@ -188,6 +210,24 @@ export class RoadRenderer {
   private previewKey = '';
 
   /**
+   * Where each edge's surface vertices landed: `[start, count)` into the merged
+   * carriageway geometry, keyed by edge id.
+   */
+  private readonly edgeRange = new Map<number, { start: number; count: number }>();
+
+  /** The carriageway's colour attribute, rewritten per edge on a flow change. */
+  private surfaceColors: THREE.BufferAttribute | null = null;
+
+  /** Traffic assignment revision the current tint was written for. */
+  private tintedRevision = -1;
+
+  /** Whether the traffic info view (full green-to-red ramp) is on. */
+  private trafficView = false;
+
+  /** Scratch colour, so the tint pass allocates nothing. */
+  private readonly scratchColor = new THREE.Color();
+
+  /**
    * @param network Graph to visualise.
    * @param sampler Terrain the roads are draped over.
    */
@@ -203,7 +243,10 @@ export class RoadRenderer {
       polygonOffsetUnits: -4,
     });
     this.surfaceMaterial = new THREE.MeshLambertMaterial({
-      color: ASPHALT_COLOR,
+      // White plus vertex colours: the asphalt tone lives in the colour
+      // attribute so congestion can modulate it without a material swap.
+      color: 0xffffff,
+      vertexColors: true,
       polygonOffset: true,
       polygonOffsetFactor: -3,
       polygonOffsetUnits: -6,
@@ -277,6 +320,65 @@ export class RoadRenderer {
     this.preview.visible = true;
   }
 
+  /**
+   * Whether the traffic info view is showing the full congestion ramp.
+   *
+   * Off by default, matching traffic.md §7: an uncongested city should look
+   * normal rather than uniformly green.
+   */
+  get trafficViewEnabled(): boolean {
+    return this.trafficView;
+  }
+
+  /**
+   * Turn the traffic info view on or off.
+   *
+   * The UI stage's info-view mode drives this; the hook exists now so that
+   * stage costs only its own chrome.
+   */
+  setTrafficView(enabled: boolean): void {
+    if (this.trafficView === enabled) return;
+    this.trafficView = enabled;
+    this.tintedRevision = -1;
+  }
+
+  /**
+   * Re-tint the carriageway from a traffic assignment.
+   *
+   * One RGB triple per vertex of each edge's recorded range plus a single
+   * buffer upload — no geometry rebuild, no material swap, no extra draw call.
+   * Cheap enough to call every frame: it early-outs on an integer compare when
+   * the assignment has not moved, which is every frame but one per in-game day.
+   *
+   * @param field The flow field. Pass `null` to clear back to plain asphalt.
+   */
+  updateCongestion(field: TrafficField | null): void {
+    const revision = field ? field.revision : -2;
+    if (revision === this.tintedRevision) return;
+    this.tintedRevision = revision;
+    const colors = this.surfaceColors;
+    if (!colors) return;
+
+    for (const edge of this.network.edges) {
+      const range = this.edgeRange.get(edge.id);
+      if (!range) continue;
+      const congestion = field ? field.congestionOf(edge.id) : 0;
+      const hex = this.trafficView
+        ? congestionColor(congestion, ASPHALT_COLOR)
+        : ASPHALT_COLOR;
+      this.scratchColor.setHex(hex);
+      if (!this.trafficView && congestion > 0) {
+        // Always-on variant: jammed asphalt just gets grubbier.
+        const shade = 1 - CONGESTION_GRIME * Math.min(congestion, 1);
+        this.scratchColor.multiplyScalar(shade);
+      }
+      for (let v = range.start; v < range.start + range.count; v++) {
+        colors.setXYZ(v, this.scratchColor.r, this.scratchColor.g, this.scratchColor.b);
+      }
+    }
+    colors.needsUpdate = true;
+  }
+
   /** Release every GPU resource this renderer owns. */
   dispose(): void {
     this.verge.geometry.dispose();
@@ -291,13 +393,17 @@ export class RoadRenderer {
     const verge = new RibbonBuilder(this.sampler);
     const surface = new RibbonBuilder(this.sampler);
 
+    this.edgeRange.clear();
     for (const edge of this.network.edges) {
       const a = this.network.node(edge.from);
       const b = this.network.node(edge.to);
       if (!a || !b) continue;
       const cls = ROAD_CLASSES[edge.roadClass] ?? ROAD_CLASSES.small;
       verge.addSegment(a.x, a.z, b.x, b.z, cls.totalWidth, VERGE_LIFT);
+      const start = surface.vertexCount;
       surface.addSegment(a.x, a.z, b.x, b.z, cls.pavedWidth, SURFACE_LIFT);
+      const count = surface.vertexCount - start;
+      if (count > 0) this.edgeRange.set(edge.id, { start, count });
     }
 
     // Cap each node with the widest class meeting there, so joins stay solid.
@@ -318,6 +424,21 @@ export class RoadRenderer {
     this.verge.geometry = verge.build();
     this.surface.geometry.dispose();
     this.surface.geometry = surface.build();
+
+    // One colour per carriageway vertex, seeded to plain asphalt. Node caps are
+    // outside every edge range and simply keep that base colour.
+    const vertices = this.surface.geometry.getAttribute('position').count;
+    const colors = new Float32Array(vertices * 3);
+    this.scratchColor.setHex(ASPHALT_COLOR);
+    for (let v = 0; v < vertices; v++) {
+      colors[v * 3] = this.scratchColor.r;
+      colors[v * 3 + 1] = this.scratchColor.g;
+      colors[v * 3 + 2] = this.scratchColor.b;
+    }
+    this.surfaceColors = new THREE.BufferAttribute(colors, 3);
+    this.surface.geometry.setAttribute('color', this.surfaceColors);
+    // The geometry is new, so whatever tint was written is gone with it.
+    this.tintedRevision = -1;
     this.builtRevision = this.network.revision;
   }
 }

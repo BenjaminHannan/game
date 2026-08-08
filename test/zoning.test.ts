@@ -280,7 +280,7 @@ describe('frontage derivation', () => {
     // hand: the point is that frontage casting consults the sampler too.
     const from = network.addNode(0, 0, 10);
     const to = network.addNode(96, 0, 10);
-    network.data.edges.push({ id: 900, from, to, roadClass: 'small', length: 96 });
+    network.data.edges.push({ id: 900, from, to, roadClass: 'small', length: 96, cost: 192 });
     network.markChanged();
     zoning.rebuildFrontage();
 
@@ -291,7 +291,7 @@ describe('frontage derivation', () => {
     const { network, zoning } = makeZoning(coast());
     const from = network.addNode(0, -96, 10);
     const to = network.addNode(0, 96, 10);
-    network.data.edges.push({ id: 901, from, to, roadClass: 'small', length: 192 });
+    network.data.edges.push({ id: 901, from, to, roadClass: 'small', length: 192, cost: 384 });
     network.markChanged();
     zoning.rebuildFrontage();
 
@@ -733,8 +733,11 @@ describe('zoning save round-trip', () => {
     return sim;
   }
 
-  it('bumps the save version to 2 for the zoning branch', () => {
-    expect(SAVE_VERSION).toBe(2);
+  it('keeps the save version at or above the one that added the zoning branch', () => {
+    // Zoning landed in version 2; growth added `buildings` and `demand` in 3.
+    // The assertion is a floor rather than an equality so a later branch does
+    // not have to touch a test about zoning.
+    expect(SAVE_VERSION).toBeGreaterThanOrEqual(2);
   });
 
   it('restores an identical zone layer into a fresh simulation', () => {

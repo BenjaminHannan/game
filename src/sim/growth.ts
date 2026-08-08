@@ -34,6 +34,7 @@ import {
   type BuildingData,
 } from './buildings.js';
 import type { DemandSource } from './demand.js';
+import { ECONOMY_TUNING } from './economy.js';
 import type { GameState, System } from './state.js';
 import {
   ZONE_CELL_COUNT,
@@ -108,6 +109,11 @@ export interface GrowthSystemOptions {
   demand: DemandSource;
   /** Road graph, used for the land-value proxy. Omit for a flat proxy. */
   roads?: RoadNetwork | null;
+  /**
+   * Treasury consulted for the broke brake (simulation.md §5 rule 3). Only the
+   * balance is read — growth never spends. Omit to grow regardless of money.
+   */
+  treasury?: { readonly money: number } | null;
   /** City seed. The zoning RNG stream is forked from it. */
   seed: number;
   /** Ticks between passes. Defaults to {@link GROWTH_INTERVAL}. */
@@ -125,6 +131,7 @@ export class GrowthSystem implements System {
   private readonly store: BuildingStore;
   private readonly demandSource: DemandSource;
   private readonly roads: RoadNetwork | null;
+  private readonly treasury: { readonly money: number } | null;
   private readonly events: GrowthEventSink | null;
   private readonly interval: number;
   private readonly spawnBudget: number;
@@ -138,6 +145,9 @@ export class GrowthSystem implements System {
   /** Sweep cursor over the zone array, and the revision it was reset for. */
   private cursor = 0;
   private sweptZoneRevision = -1;
+
+  /** Cells swept since the cursor was last reset, capped at one full lap. */
+  private sweptSinceReset = 0;
 
   /** Rotating viability-scan cursor over the building list. */
   private scanCursor = 0;
@@ -166,6 +176,7 @@ export class GrowthSystem implements System {
     this.store = options.buildings;
     this.demandSource = options.demand;
     this.roads = options.roads ?? null;
+    this.treasury = options.treasury ?? null;
     this.events = options.events ?? null;
     this.interval = Math.max(1, Math.floor(options.interval ?? GROWTH_INTERVAL));
     this.spawnBudget = Math.max(0, Math.floor(options.spawnBudget ?? GROWTH_SPAWN_BUDGET));
@@ -197,7 +208,7 @@ export class GrowthSystem implements System {
     return this.ringCount[ZONE_TYPES.indexOf(zone)] as number;
   }
 
-  step(state: GameState, tick: number): void {
+  step(_state: GameState, tick: number): void {
     if (tick % this.interval !== 0) return;
     this.growthTick(tick);
   }
@@ -232,6 +243,19 @@ export class GrowthSystem implements System {
     if (!this.roads || this.roads.nodes.length === 0) return 1;
     const distance = Math.hypot(x - this.centroidX, z - this.centroidZ);
     return clamp01(1 - distance / LAND_VALUE_RANGE);
+  }
+
+  /**
+   * Growth-probability multiplier from the treasury's state.
+   *
+   * 1 while solvent, {@link ECONOMY_TUNING.brokeGrowthPenalty} while overdrawn.
+   * A brake, not a wall (simulation.md §5): the city still grows, slowly, and
+   * nothing standing is destroyed — the player's way out is time and the tax
+   * rate, both available and neither instant.
+   */
+  brokeFactor(): number {
+    if (this.treasury === null || this.treasury.money >= 0) return 1;
+    return ECONOMY_TUNING.brokeGrowthPenalty;
   }
 
   /** Queue a building for demolition. Ignores ids already queued. */
@@ -280,6 +304,7 @@ export class GrowthSystem implements System {
     this.ringHead[1] = 0;
     this.ringHead[2] = 0;
     this.cursor = 0;
+    this.sweptSinceReset = 0;
   }
 
   /** Split the spawn budget across zones by demand and try to fill it. */
@@ -343,7 +368,8 @@ export class GrowthSystem implements System {
       const value = this.landValueAt(cellCentreX(seedCell), cellCentreZ(seedCell));
       const chance =
         (GROWTH_BASE_CHANCE + (1 - GROWTH_BASE_CHANCE) * pressure) *
-        (1 - LAND_VALUE_WEIGHT + LAND_VALUE_WEIGHT * value);
+        (1 - LAND_VALUE_WEIGHT + LAND_VALUE_WEIGHT * value) *
+        this.brokeFactor();
       if (!this.rng.chance(chance)) {
         // The cell is fine, it just lost the roll — put it back so the same
         // block keeps competing on later passes instead of being burned.
@@ -371,7 +397,14 @@ export class GrowthSystem implements System {
     if (this.zoning.zoneRevision !== this.sweptZoneRevision) {
       this.sweptZoneRevision = this.zoning.zoneRevision;
       this.cursor = 0;
+      this.sweptSinceReset = 0;
     }
+    // Once a full lap has been walked since the last repaint, the grid holds no
+    // candidates the cursor has not already seen — so an empty ring means the
+    // city genuinely has nowhere to grow, not that the cursor is behind. Drop
+    // back to the cheap steady-state sweep rather than re-reading 262 k cells
+    // twice a second for a city that is simply full.
+    const lapped = this.sweptSinceReset >= ZONE_CELL_COUNT;
 
     const zone = this.zoning.zone;
     const depth = this.zoning.depth;
@@ -380,10 +413,16 @@ export class GrowthSystem implements System {
 
     let swept = 0;
     while (swept < ZONE_CELL_COUNT) {
-      if (swept >= CANDIDATE_SWEEP && this.bufferedCandidates() >= CANDIDATE_HUNGRY) break;
+      if (
+        swept >= CANDIDATE_SWEEP &&
+        (lapped || this.bufferedCandidates() >= CANDIDATE_HUNGRY)
+      ) {
+        break;
+      }
       const k = this.cursor;
       this.cursor = k + 1 >= ZONE_CELL_COUNT ? 0 : k + 1;
       swept++;
+      if (this.sweptSinceReset < ZONE_CELL_COUNT) this.sweptSinceReset++;
       const code = zone[k] as number;
       if (code === 0 || code > 3) continue;
       if (depth[k] !== 0) continue;
