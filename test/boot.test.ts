@@ -16,8 +16,11 @@ import { CameraRig } from '../src/render/cameraRig.js';
 import { InputManager } from '../src/input/input.js';
 import { SelectTool, ToolManager } from '../src/input/tools.js';
 import { RoadTool } from '../src/input/roadTool.js';
-import { Simulation } from '../src/sim/state.js';
+import { ZONE_TOOL_MODES, ZoneTool } from '../src/input/zoneTool.js';
+import { Simulation, ZoningSystem } from '../src/sim/state.js';
 import { RoadRenderer, SURFACE_LIFT } from '../src/render/roadMesh.js';
+import { ZoneOverlay, ZONE_LIFT } from '../src/render/zoneOverlay.js';
+import { ZONE_COLORS, cellAt } from '../src/sim/zoning.js';
 import { Hud } from '../src/ui/hud.js';
 
 describe('boot', () => {
@@ -152,6 +155,105 @@ describe('boot', () => {
     tools.key('Escape');
     tools.setActive('select');
     roads.dispose();
+  });
+
+  it('wires the zone tool into the toolbar, the overlay and the HUD', () => {
+    const mount = document.createElement('div');
+    document.body.append(mount);
+
+    const sim = new Simulation(20260101, { sampler: terrain, bounds: WORLD_HALF });
+    sim.addSystem(new ZoningSystem(sim.zoning));
+    const overlay = new ZoneOverlay(sim.zoning, terrain);
+
+    const tools = new ToolManager();
+    tools.register(new SelectTool());
+    const zoneTool = new ZoneTool({
+      zoning: sim.zoning,
+      preview: overlay,
+      budget: sim.state,
+    });
+    tools.register(zoneTool);
+
+    const engine = new Engine();
+    const hud = new Hud(mount, engine, sim.state, tools);
+    hud.registerToolModes(
+      'zones',
+      ZONE_TOOL_MODES.map((mode) => ({
+        id: mode.paint,
+        label: mode.label,
+        color: mode.paint === 'none' ? undefined : ZONE_COLORS[mode.paint],
+        onSelect: () => {
+          tools.setActive('zones');
+          zoneTool.setPaint(mode.paint);
+        },
+      })),
+      zoneTool.paint,
+    );
+
+    // The options row stays hidden until the Zones toolbar entry is picked.
+    expect(hud.visibleToolModes).toBeNull();
+    const zonesButton = mount.querySelector('button.hud-tool[data-tool="zones"]');
+    expect(zonesButton).not.toBeNull();
+    (zonesButton as HTMLButtonElement).click();
+    expect(tools.current?.id).toBe('zones');
+    expect(hud.visibleToolModes).toBe('zones');
+    expect(mount.querySelectorAll('button.hud-mode[data-tool="zones"]')).toHaveLength(4);
+
+    // Picking the industrial brush goes through the DOM, not the tool API.
+    const industrial = mount.querySelector(
+      'button.hud-mode[data-tool="zones"][data-mode="industrial"]',
+    ) as HTMLButtonElement;
+    industrial.click();
+    expect(zoneTool.paint).toBe('industrial');
+    expect(industrial.classList.contains('is-active')).toBe(true);
+
+    // Lay a road on real terrain, tick so the zoning system derives the cells,
+    // then drag-paint along its frontage.
+    let start: [number, number] | null = null;
+    for (let x = -600; x <= 600 && !start; x += 64) {
+      for (let z = -600; z <= 600 && !start; z += 64) {
+        if (sim.roads.plan(x, z, x + 200, z).ok) start = [x, z];
+      }
+    }
+    const [sx, sz] = start as [number, number];
+    sim.roads.placeSegment(sx, sz, sx + 200, sz);
+    sim.step(1);
+    expect(sim.zoning.zonableCells).toBeGreaterThan(0);
+
+    const hit = (x: number, z: number) => ({ x, y: terrain.heightAt(x, z), z });
+    tools.pointerDown(hit(sx + 8, sz + 12), 0);
+    tools.pointerMove(hit(sx + 190, sz + 12));
+    tools.pointerUp(hit(sx + 190, sz + 12), 0);
+
+    const counts = sim.zoning.counts();
+    expect(counts.industrial).toBeGreaterThan(0);
+    expect(sim.state.money).toBeLessThan(500000);
+
+    // The overlay picks the paint up on the next frame and lays each quad on
+    // the ground under it.
+    overlay.setShowEmptyCells(true);
+    overlay.update();
+    expect(overlay.paintedCount).toBe(counts.zoned);
+    expect(overlay.emptyCount).toBe(counts.zonable - counts.zoned);
+
+    const tint = overlay.group.getObjectByName('ZoneTint') as THREE.InstancedMesh;
+    const matrix = new THREE.Matrix4();
+    const position = new THREE.Vector3();
+    for (let i = 0; i < tint.count; i += 5) {
+      tint.getMatrixAt(i, matrix);
+      position.setFromMatrixPosition(matrix);
+      expect(position.y).toBeCloseTo(terrain.heightAt(position.x, position.z) + ZONE_LIFT, 4);
+    }
+
+    // Switching away hides the options row and the tool's preview.
+    (mount.querySelector('button.hud-tool[data-tool="select"]') as HTMLButtonElement).click();
+    expect(hud.visibleToolModes).toBeNull();
+    expect(overlay.previewCount).toBe(0);
+    expect(sim.zoning.zoneAt(cellAt(sx + 100, sz + 12))).toBe('industrial');
+
+    overlay.dispose();
+    hud.dispose();
+    mount.remove();
   });
 
   it('keeps the camera target inside the world when panning hard', () => {

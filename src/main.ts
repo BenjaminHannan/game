@@ -269,7 +269,7 @@ function boot(): void {
     '%cMetropolis%c — roads and zoning online.\n' +
       'WASD / middle-drag pan · right-drag rotate · wheel zoom · Space pause · 1/2/3 speed\n' +
       'Roads tool: click to start, click to chain segments, Esc or right-click to cancel\n' +
-      'Zones tool: drag to paint, right-drag to erase, [ and ] resize the brush',
+      'Zones tool: drag to paint, pick De-zone to erase, [ and ] resize the brush',
     'font-weight:bold;color:#4da3ff',
     'color:inherit',
   );

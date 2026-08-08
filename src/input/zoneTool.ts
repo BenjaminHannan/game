@@ -213,8 +213,8 @@ export class ZoneTool extends BaseTool {
   }
 
   override onPointerUp(_hit: TerrainHit | null, button: number): void {
-    if (!this.painting) return;
-    if (button === 0 || button === 2) this.commitStroke();
+    if (!this.painting || button !== 0) return;
+    this.commitStroke();
   }
 
   override onKey(code: string): void {

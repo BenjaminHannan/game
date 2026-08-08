@@ -141,6 +141,10 @@ export class Simulation implements SaveProvider<GameState> {
   }
 
   deserialize(data: GameState): void {
+    // Read the zoning branch before the merge: a version-1 document has no such
+    // key, and `Object.assign` would silently leave the *previous* session's
+    // zoning in place instead of clearing it.
+    const zoningBranch = (data as Partial<GameState> | null | undefined)?.zoning;
     Object.assign(this.state, data);
     // Saves written before roads existed, or hand-edited ones, are repaired
     // rather than trusted; renderers are told to rebuild from the new graph.
@@ -149,7 +153,7 @@ export class Simulation implements SaveProvider<GameState> {
     // Zoning decodes after roads, because frontage is rebuilt from the graph
     // that just landed. A version-1 save has no zoning branch at all, which
     // normalizes to an empty grid.
-    this.zoning.deserialize(this.state.zoning);
+    this.zoning.deserialize(zoningBranch);
     this.state.zoning = this.zoning.serialize();
   }
 }
