@@ -1,13 +1,23 @@
-# Fathom
+# Metropolis
 
-A deep-sea idle game for the browser. Send drones into the abyss, salvage what they find, and see how deep you can go.
+An original open-source 3D city-building game for the browser, inspired by Cities: Skylines II. TypeScript + three.js, simulation-first.
 
-**Play it:** open `index.html` in a browser — or serve the folder with any static server (`python3 -m http.server`). No build step, no dependencies.
+**Status: early development.** Engine loop, procedural terrain, orbit camera, input tooling, and the save system are in place; road drawing is the next milestone, then zoning and the growth simulation.
 
-To host it on GitHub Pages: repo **Settings → Pages → Deploy from a branch**, pick this branch and `/ (root)`.
+## Develop
 
-- Design, feature spec, and build plan: [SCOPE.md](SCOPE.md)
-- All content and balance numbers: [`js/data.js`](js/data.js) — tuning the game is editing that file
-- Engine (state, economy, saves): [`js/game.js`](js/game.js) · UI: [`js/ui.js`](js/ui.js)
+```
+npm install
+npm run dev        # vite dev server
+npm test           # vitest suite
+npm run typecheck  # tsc --noEmit
+npm run build      # production build
+```
 
-Saves live in your browser (localStorage, autosaved every 15 s), with offline earnings when you come back and an export/import code in settings for moving between browsers.
+## Layout
+
+- `src/core/` — engine loop, events, RNG, noise, save system, sim clock
+- `src/render/` — renderer, terrain, sky, camera rig
+- `src/sim/` — simulation state
+- `src/input/`, `src/ui/` — pointer/tool handling, HUD
+- `docs/ORCHESTRATION.md` — build plan · `docs/research/roads.md` — road-network research

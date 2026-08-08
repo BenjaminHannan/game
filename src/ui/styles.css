@@ -1,0 +1,178 @@
+/* Metropolis HUD — dark translucent panels layered over the 3D view. */
+
+:root {
+  --panel-bg: rgba(16, 20, 28, 0.72);
+  --panel-border: rgba(255, 255, 255, 0.09);
+  --panel-radius: 12px;
+  --text: #e8ebf1;
+  --text-dim: #98a2b3;
+  --accent: #4da3ff;
+  --accent-soft: rgba(77, 163, 255, 0.18);
+  --money: #6ee7a8;
+  --shadow: 0 6px 24px rgba(0, 0, 0, 0.42);
+}
+
+.hud {
+  position: absolute;
+  inset: 0;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  color: var(--text);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+.hud-panel {
+  position: absolute;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--panel-radius);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(10px);
+  pointer-events: auto;
+}
+
+/* --- Top left: identity --- */
+.hud-city {
+  top: 16px;
+  left: 16px;
+  padding: 10px 16px;
+}
+
+.hud-city__name {
+  font-size: 18px;
+  font-weight: 650;
+  letter-spacing: 0.2px;
+}
+
+.hud-city__date {
+  margin-top: 2px;
+  font-size: 13px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Top right: resources and speed --- */
+.hud-status {
+  top: 16px;
+  right: 16px;
+  padding: 10px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.hud-stats {
+  display: flex;
+  gap: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.hud-stat__label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  color: var(--text-dim);
+}
+
+.hud-stat__value {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.hud-stat__value--money {
+  color: var(--money);
+}
+
+.hud-speed {
+  display: flex;
+  gap: 4px;
+}
+
+.hud-speed__btn {
+  min-width: 34px;
+  padding: 5px 8px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid transparent;
+  border-radius: 7px;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.hud-speed__btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--text);
+}
+
+.hud-speed__btn.is-active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* --- Bottom centre: toolbar --- */
+.hud-toolbar {
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 8px;
+  display: flex;
+  gap: 6px;
+}
+
+.hud-tool {
+  padding: 9px 15px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease,
+    transform 0.12s ease;
+}
+
+.hud-tool:hover {
+  background: rgba(255, 255, 255, 0.11);
+  color: var(--text);
+  transform: translateY(-1px);
+}
+
+.hud-tool.is-active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* --- Bottom right: debug readout --- */
+.hud-debug {
+  bottom: 16px;
+  right: 16px;
+  padding: 8px 12px;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  pointer-events: none;
+}
+
+.hud-debug__value {
+  color: var(--text);
+}
