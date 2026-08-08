@@ -137,7 +137,9 @@ export class RibbonBuilder {
     for (let i = 0; i < segments; i++) {
       const a = centre + 1 + i;
       const b = centre + 1 + ((i + 1) % segments);
-      this.indices.push(centre, a, b);
+      // Wound so the disc faces +Y like the ribbons: rim angles advance
+      // clockwise when viewed from above, so the later vertex comes first.
+      this.indices.push(centre, b, a);
     }
   }
 
