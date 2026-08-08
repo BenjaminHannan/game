@@ -1,4 +1,10 @@
-/* Metropolis HUD — dark translucent panels layered over the 3D view. */
+/* Metropolis HUD — dark translucent panels layered over the 3D view.
+ *
+ * Original visual language throughout: a cool near-black glass, one 12 px
+ * corner radius, a single blue accent for "armed", a single warm red reserved
+ * for destruction, and geometric stroke icons at one weight. Nothing here is
+ * derived from another game's chrome — only the *arrangement* is familiar.
+ */
 
 :root {
   --panel-bg: rgba(16, 20, 28, 0.72);
@@ -11,7 +17,11 @@
   --money: #6ee7a8;
   --warning: #f2c14e;
   --danger: #ff6b6b;
+  --destructive: #e1544a;
+  --destructive-soft: rgba(225, 84, 74, 0.18);
   --shadow: 0 6px 24px rgba(0, 0, 0, 0.42);
+  --control-bg: rgba(255, 255, 255, 0.04);
+  --control-hover: rgba(255, 255, 255, 0.11);
 }
 
 .hud {
@@ -21,6 +31,12 @@
   color: var(--text);
   font-size: 14px;
   -webkit-font-smoothing: antialiased;
+}
+
+/* Backtick hides the whole overlay for an unobstructed look at the city. */
+.hud.is-hidden {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .hud-panel {
@@ -33,11 +49,34 @@
   pointer-events: auto;
 }
 
-/* --- Top left: identity --- */
+/* The HUD hides things by setting `el.hidden`, and several panels below declare
+   their own `display` — which outranks the user-agent `[hidden]` rule and
+   leaves an empty pane on screen. Restore the attribute's meaning once, here,
+   rather than pairing every future `display` with its own guard. */
+[hidden] {
+  display: none !important;
+}
+
+.hud-icon {
+  display: block;
+}
+
+/* Focus is never invisible: every control shows the same ring, which is what
+   makes the toolbar usable from the keyboard alone. */
+.hud button:focus-visible,
+.hud [tabindex]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* --- Top left: identity, clock, speed --- */
 .hud-city {
   top: 16px;
   left: 16px;
-  padding: 10px 16px;
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
 }
 
 .hud-city__name {
@@ -53,15 +92,98 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* --- Top right: resources and speed --- */
+.hud-speed {
+  display: flex;
+  gap: 4px;
+}
+
+.hud-speed__btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  height: 28px;
+  padding: 0 8px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  background: var(--control-bg);
+  border: 1px solid transparent;
+  border-radius: 7px;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.hud-speed__btn:hover {
+  background: var(--control-hover);
+  color: var(--text);
+}
+
+.hud-speed__btn.is-active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* --- Top left, under the clock: info-view openers --- */
+.hud-views {
+  top: 74px;
+  left: 16px;
+  padding: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-width: 320px;
+}
+
+.hud-view {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 11px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--text-dim);
+  background: var(--control-bg);
+  border: 1px solid transparent;
+  border-radius: 7px;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.hud-view:hover:not(.is-locked) {
+  background: var(--control-hover);
+  color: var(--text);
+}
+
+.hud-view.is-active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Locked entries stay visible, hoverable and tabbable so the row reads as a
+   promise and can still explain itself. They are aria-disabled, not disabled. */
+.hud-view.is-locked,
+.hud-tool.is-locked {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* --- Top right: resources and demand --- */
 .hud-status {
   top: 16px;
   right: 16px;
   padding: 10px 16px;
   display: flex;
-  flex-direction: column;
-  gap: 8px;
   align-items: flex-end;
+  gap: 18px;
 }
 
 .hud-stats {
@@ -74,6 +196,7 @@
   display: flex;
   flex-direction: column;
   align-items: flex-end;
+  border-radius: 6px;
 }
 
 .hud-stat__label {
@@ -117,16 +240,22 @@
    demand reads as a downward bar rather than as an empty track. */
 .hud-demand {
   display: flex;
-  gap: 5px;
-  justify-content: flex-end;
+  gap: 6px;
   align-items: flex-end;
-  height: 26px;
+}
+
+.hud-demand__column {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  border-radius: 5px;
 }
 
 .hud-demand__track {
   position: relative;
   width: 12px;
-  height: 100%;
+  height: 30px;
   border-radius: 2px;
   background: rgba(255, 255, 255, 0.12);
   overflow: hidden;
@@ -156,36 +285,11 @@
   opacity: 0.55;
 }
 
-.hud-speed {
-  display: flex;
-  gap: 4px;
-}
-
-.hud-speed__btn {
-  min-width: 34px;
-  padding: 5px 8px;
-  font: inherit;
-  font-size: 12px;
-  font-weight: 600;
+.hud-demand__letter {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
   color: var(--text-dim);
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid transparent;
-  border-radius: 7px;
-  cursor: pointer;
-  transition:
-    background 0.12s ease,
-    color 0.12s ease;
-}
-
-.hud-speed__btn:hover {
-  background: rgba(255, 255, 255, 0.12);
-  color: var(--text);
-}
-
-.hud-speed__btn.is-active {
-  background: var(--accent-soft);
-  border-color: var(--accent);
-  color: var(--accent);
 }
 
 /* --- Bottom centre: toolbar --- */
@@ -199,14 +303,19 @@
 }
 
 .hud-tool {
-  padding: 9px 15px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-width: 66px;
+  padding: 8px 12px;
   font: inherit;
-  font-size: 13px;
+  font-size: 11px;
   font-weight: 550;
   color: var(--text-dim);
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--control-bg);
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: 9px;
   cursor: pointer;
   transition:
     background 0.12s ease,
@@ -214,8 +323,8 @@
     transform 0.12s ease;
 }
 
-.hud-tool:hover {
-  background: rgba(255, 255, 255, 0.11);
+.hud-tool:hover:not(.is-locked) {
+  background: var(--control-hover);
   color: var(--text);
   transform: translateY(-1px);
 }
@@ -226,9 +335,24 @@
   color: var(--accent);
 }
 
+/* The bulldozer is kept visually apart from the constructive categories. */
+.hud-tool--destructive {
+  margin-left: 10px;
+}
+
+.hud-tool--destructive:hover:not(.is-locked) {
+  color: #ffb4ac;
+}
+
+.hud-tool--destructive.is-active {
+  background: var(--destructive-soft);
+  border-color: var(--destructive);
+  color: #ffb4ac;
+}
+
 /* --- Bottom centre: active-tool hint, sitting above the toolbar --- */
 .hud-hint {
-  bottom: 74px;
+  bottom: 88px;
   left: 50%;
   transform: translateX(-50%);
   padding: 6px 14px;
@@ -261,9 +385,9 @@
   color: var(--text);
 }
 
-/* --- Bottom centre: tool options (zone brushes), above the hint --- */
+/* --- Bottom centre: tool options, above the hint --- */
 .hud-mode-row {
-  bottom: 110px;
+  bottom: 124px;
   left: 50%;
   transform: translateX(-50%);
   padding: 6px;
@@ -280,7 +404,7 @@
   font-size: 12px;
   font-weight: 550;
   color: var(--text-dim);
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--control-bg);
   border: 1px solid transparent;
   border-radius: 7px;
   cursor: pointer;
@@ -290,7 +414,7 @@
 }
 
 .hud-mode:hover {
-  background: rgba(255, 255, 255, 0.11);
+  background: var(--control-hover);
   color: var(--text);
 }
 
@@ -306,4 +430,243 @@
   border-radius: 3px;
   background: var(--text-dim);
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+
+.hud-mode__icon {
+  display: flex;
+}
+
+/* --- Bottom left: the active info view's panel --- */
+.hud-infopanel {
+  bottom: 20px;
+  left: 16px;
+  padding: 12px 16px;
+  min-width: 190px;
+  max-width: 260px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.hud-infopanel__title {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--text-dim);
+}
+
+.hud-infopanel__readout {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.hud-infopanel__value {
+  font-size: 22px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-infopanel__label {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.hud-infopanel__note {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+
+.hud-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 2px;
+}
+
+.hud-legend__stop {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.hud-legend__swatch {
+  width: 14px;
+  height: 8px;
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
+}
+
+/* --- The one tooltip card --- */
+.hud-tip {
+  position: fixed;
+  z-index: 40;
+  max-width: 280px;
+  padding: 9px 12px;
+  background: rgba(10, 13, 19, 0.94);
+  border: 1px solid var(--panel-border);
+  border-radius: 9px;
+  box-shadow: var(--shadow);
+  pointer-events: none;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.hud-tip__title {
+  font-size: 13px;
+  font-weight: 620;
+}
+
+.hud-tip__subtitle {
+  margin-top: 1px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  color: var(--text-dim);
+}
+
+.hud-tip__rows {
+  margin-top: 7px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-tip__row {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.hud-tip__label {
+  color: var(--text-dim);
+}
+
+.hud-tip__value.is-warning {
+  color: var(--warning);
+}
+
+.hud-tip__note {
+  margin-top: 7px;
+  padding-top: 6px;
+  border-top: 1px solid var(--panel-border);
+  color: var(--text-dim);
+}
+
+/* --- Toasts: transient confirmations, under the vital-signs cluster --- */
+.hud-toasts {
+  position: absolute;
+  top: 116px;
+  right: 16px;
+  width: 290px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: stretch;
+  pointer-events: none;
+}
+
+.hud-toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 9px 10px 9px 11px;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-left: 3px solid var(--accent);
+  border-radius: 9px;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(10px);
+  pointer-events: auto;
+  animation: hud-toast-in 160ms ease-out;
+}
+
+@keyframes hud-toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(12px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hud-toast {
+    animation: none;
+  }
+}
+
+.hud-toast[data-kind='success'] {
+  border-left-color: var(--money);
+}
+
+.hud-toast[data-kind='warning'] {
+  border-left-color: var(--warning);
+}
+
+.hud-toast[data-kind='error'] {
+  border-left-color: var(--destructive);
+}
+
+.hud-toast__icon {
+  display: flex;
+  margin-top: 1px;
+  color: var(--text-dim);
+}
+
+.hud-toast[data-kind='success'] .hud-toast__icon {
+  color: var(--money);
+}
+
+.hud-toast[data-kind='warning'] .hud-toast__icon {
+  color: var(--warning);
+}
+
+.hud-toast[data-kind='error'] .hud-toast__icon {
+  color: var(--destructive);
+}
+
+.hud-toast__text {
+  flex: 1;
+  min-width: 0;
+}
+
+.hud-toast__title {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.hud-toast__count {
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.hud-toast__body {
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+
+.hud-toast__close {
+  display: flex;
+  padding: 3px;
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.hud-toast__close:hover {
+  color: var(--text);
+  background: var(--control-hover);
 }

@@ -17,9 +17,17 @@ import { InputManager } from './input/input.js';
 import { SelectTool, ToolManager } from './input/tools.js';
 import { RoadTool } from './input/roadTool.js';
 import { ZONE_TOOL_MODES, ZoneTool } from './input/zoneTool.js';
+import { BulldozeTool } from './input/bulldozeTool.js';
+import {
+  BULLDOZE_FILTERS,
+  BULLDOZE_FILTER_LABELS,
+  resolveBulldozeTarget,
+  type BulldozeFilter,
+  type BulldozeTarget,
+} from './sim/bulldoze.js';
 import { BuildingRenderer } from './render/buildingMesh.js';
 import { VehicleRenderer } from './render/vehicles.js';
-import { TrafficSystem } from './sim/traffic.js';
+import { TrafficSystem, congestionColor } from './sim/traffic.js';
 import { Simulation, ZoningSystem } from './sim/state.js';
 import { DemandSystem, type CityTotals, type DemandState } from './sim/demand.js';
 import { GrowthSystem } from './sim/growth.js';
@@ -31,16 +39,25 @@ import {
   type LedgerTotals,
 } from './sim/economy.js';
 import type { BuildingData, BuildingStore } from './sim/buildings.js';
-import type { RoadEdgeData, RoadNetwork } from './sim/roads.js';
+import {
+  ROAD_CLASSES,
+  ROAD_CLASS_IDS,
+  type RoadClassId,
+  type RoadEdgeData,
+  type RoadNetwork,
+} from './sim/roads.js';
 import {
   ZONE_COLORS,
+  ZONE_COST_PER_CELL,
   cellAt,
   type CellKey,
   type ZonePaint,
   type ZoneType,
   type ZoningState,
 } from './sim/zoning.js';
-import { Hud } from './ui/hud.js';
+import { Hud, formatMoney, formatPopulation } from './ui/hud.js';
+import { InfoViewManager } from './ui/infoViews.js';
+import { ASPHALT_COLOR } from './render/roadMesh.js';
 
 /** Seed for this session's world. Fixed for now; later chosen at new-game time. */
 const WORLD_SEED = 20260101;
@@ -215,12 +232,70 @@ export interface MetropolisDebugApi {
   };
   /** Show or hide the decorative vehicles. Returns the new state. */
   setVehiclesVisible(visible: boolean): boolean;
+
+  // --- Camera ----------------------------------------------------------
+  camera: CameraRig;
+  /**
+   * Where a ground position currently sits on screen, in CSS pixels relative to
+   * the canvas, or `null` when it is behind the camera. This is what lets an
+   * automated driver aim real pointer events at a world coordinate.
+   */
+  worldToScreen(x: number, z: number): { x: number; y: number } | null;
+
+  // --- UI shell --------------------------------------------------------
+  hud: Hud;
+  bulldozeTool: BulldozeTool;
+  infoViews: InfoViewManager;
+  /** Narrow the bulldozer to one layer, or `'all'`. */
+  setBulldozeFilter(filter: BulldozeFilter): BulldozeFilter;
+  /** What one bulldozer click at a world position would remove, without doing it. */
+  bulldozeTargetAt(
+    x: number,
+    z: number,
+  ): { kind: string; id: number; cells: number; refund: number; label: string } | null;
+  /**
+   * Remove whatever the current filter admits at a world position and credit the
+   * refund, exactly as a click would.
+   * @returns What was removed, or `null` when there was nothing there.
+   */
+  bulldozeAt(
+    x: number,
+    z: number,
+  ): { kind: string; id: number; cells: number; refund: number; label: string } | null;
+  /** Id of the active info view, or `null`. */
+  infoView(): string | null;
+  /** Turn an info view on, or pass `null` for none. Returns the id now active. */
+  setInfoView(id: string | null): string | null;
+  /** Every registered info view, with its availability. */
+  infoViewList(): Array<{ id: string; label: string; available: boolean }>;
+  /** Raise a toast. Returns its id. */
+  notify(title: string, body?: string, kind?: 'info' | 'success' | 'warning' | 'error'): number;
+  /** Toasts currently on screen. */
+  toasts(): Array<{ id: number; kind: string; title: string; body: string; count: number }>;
+  /** Dismiss every toast. */
+  clearToasts(): void;
+  /** Road class the road tool places. */
+  setRoadClass(id: RoadClassId): RoadClassId;
 }
 
 declare global {
   interface Window {
     metropolis?: MetropolisDebugApi;
   }
+}
+
+/** Flatten a bulldoze target into the plain shape the debug API publishes. */
+function describeTarget(
+  target: BulldozeTarget | null,
+): { kind: string; id: number; cells: number; refund: number; label: string } | null {
+  if (!target) return null;
+  return {
+    kind: target.kind,
+    id: target.id,
+    cells: target.cells.length,
+    refund: target.refund,
+    label: target.label,
+  };
 }
 
 function boot(): void {
@@ -352,6 +427,33 @@ function boot(): void {
   // --- UI ---
   const hud = new Hud(uiRoot, engine, simulation.state, tools, {
     totals: () => demandSystem.totals,
+    budget: () => ({
+      tax: economySystem.projectedTax(),
+      upkeep: economySystem.projectedUpkeep(),
+      roadLength: simulation.roads.totalLength,
+    }),
+  });
+
+  // The settled month is the one economic event with no location, so it is a
+  // toast rather than a world marker (ux-conventions.md §6 keeps the two
+  // channels apart: markers must be trustworthy and complete, toasts expire).
+  bus.on('economy:settled', (payload) => {
+    const losing = payload.net < 0;
+    hud.notify({
+      title: losing ? 'Month closed at a loss' : 'Month settled',
+      // The net is the whole month's ledger, so what the player spent building
+      // during it has to appear here too — three numbers that do not add up are
+      // worse than four that do.
+      body:
+        `Tax ${formatMoney(payload.totals.tax)} · ` +
+        `upkeep ${formatMoney(-payload.totals.roadUpkeep)} · ` +
+        (payload.totals.construction > 0
+          ? `building ${formatMoney(-payload.totals.construction)} · `
+          : '') +
+        (payload.totals.refund > 0 ? `refunds ${formatMoney(payload.totals.refund)} · ` : '') +
+        `net ${payload.net >= 0 ? '+' : ''}${formatMoney(payload.net)}`,
+      kind: payload.money < 0 ? 'error' : losing ? 'warning' : 'success',
+    });
   });
 
   const roadTool = new RoadTool({
@@ -374,6 +476,67 @@ function boot(): void {
   });
   tools.register(zoneTool);
 
+  const bulldozeTool = new BulldozeTool({
+    world: {
+      roads: simulation.roads,
+      zoning,
+      buildings: simulation.buildings,
+    },
+    preview: zoneOverlay,
+    budget: simulation.ledger,
+    onStatus: (status) => {
+      hud.setHint(status.message || null, false);
+    },
+    onDemolished: (target) => {
+      hud.notify({
+        title: `Removed ${target.label.toLowerCase()}`,
+        body:
+          target.refund > 0
+            ? `${target.detail} · refunded ${formatMoney(target.refund)}`
+            : `${target.detail} · nothing to refund`,
+        kind: 'info',
+        icon: 'bulldoze',
+      });
+    },
+  });
+  tools.register(bulldozeTool);
+
+  // --- Tool option rows (the third level: "how", independent of "which") ---
+
+  // Roads: the class catalogue, each with its price decomposed on hover. This
+  // is ux-conventions.md §5's rule made concrete — a toolbar asset shows its
+  // name, its construction cost and its upkeep before the player commits.
+  hud.registerToolModes(
+    'roads',
+    ROAD_CLASS_IDS.map((id) => {
+      const cls = ROAD_CLASSES[id];
+      return {
+        id,
+        label: cls.name,
+        glyph: 'roads' as const,
+        tooltip: () => ({
+          title: cls.name,
+          subtitle: 'Road class',
+          rows: [
+            { label: 'Construction', value: `¤${cls.costPerMetre} / m` },
+            { label: 'Upkeep', value: `¤${cls.upkeepPerMetre} / m / month` },
+            { label: 'Speed limit', value: `${cls.speedLimit} km/h` },
+            { label: 'Capacity', value: `${cls.lanes * cls.laneCapacity} veh/h` },
+            { label: 'Right of way', value: `${cls.totalWidth} m` },
+          ],
+          note: cls.zonable
+            ? 'Emits zoning cells four deep along both verges.'
+            : 'Carries traffic only — no zoning cells along its frontage.',
+        }),
+        onSelect: () => {
+          tools.setActive('roads');
+          roadTool.roadClass = id;
+        },
+      };
+    }),
+    roadTool.roadClass,
+  );
+
   // The zone tool's four brushes ride in the HUD's tool-options row, shown only
   // while the "Zones" toolbar entry is active.
   hud.registerToolModes(
@@ -382,6 +545,26 @@ function boot(): void {
       id: mode.paint,
       label: mode.label,
       color: mode.paint === 'none' ? undefined : ZONE_COLORS[mode.paint],
+      glyph:
+        mode.paint === 'none'
+          ? ('dezone' as const)
+          : (mode.paint as 'residential' | 'commercial' | 'industrial'),
+      tooltip: () => ({
+        title: mode.label,
+        subtitle: 'Zone brush',
+        rows: [
+          {
+            label: 'Cost',
+            value: mode.paint === 'none' ? 'free' : `¤${ZONE_COST_PER_CELL} / cell`,
+          },
+          { label: 'Brush', value: `${zoneTool.brushRadius * 2 + 1} cells across` },
+          { label: 'Resize', value: '[ and ]' },
+        ],
+        note:
+          mode.paint === 'none'
+            ? 'Clears paint. Free here; the bulldozer pays a refund for the same work.'
+            : 'Only sticks to cells a road has made zonable. Buildings grow themselves.',
+      }),
       onSelect: () => {
         tools.setActive('zones');
         zoneTool.setPaint(mode.paint);
@@ -390,10 +573,156 @@ function boot(): void {
     zoneTool.paint,
   );
 
-  // The faint tint over unpainted-but-zonable cells is a zone-tool affordance,
-  // so it follows the tool rather than being always on.
+  // Bulldoze: which layer the blade is allowed to eat.
+  hud.registerToolModes(
+    'bulldoze',
+    BULLDOZE_FILTERS.map((filter) => ({
+      id: filter,
+      label: BULLDOZE_FILTER_LABELS[filter],
+      glyph:
+        filter === 'roads'
+          ? ('roads' as const)
+          : filter === 'zones'
+            ? ('zones' as const)
+            : filter === 'buildings'
+              ? ('residential' as const)
+              : ('bulldoze' as const),
+      tooltip: () => ({
+        title: `Bulldoze: ${BULLDOZE_FILTER_LABELS[filter]}`,
+        subtitle: 'Layer filter',
+        rows: [
+          { label: 'Road refund', value: '25% of what you paid' },
+          { label: 'Zoning refund', value: `¤${Math.round(ZONE_COST_PER_CELL * 0.25)} / cell` },
+          { label: 'Building refund', value: 'none' },
+        ],
+        note:
+          filter === 'all'
+            ? 'Eats the building, then the road, then the paint under both.'
+            : 'Restricts the blade so one layer can be cleared without losing the others.',
+      }),
+      onSelect: () => {
+        tools.setActive('bulldoze');
+        bulldozeTool.setFilter(filter);
+      },
+    })),
+    bulldozeTool.filter,
+  );
+
+  // --- Info views: a mode over the world, opened from the top-left cluster ---
+  const infoViews = new InfoViewManager();
+
+  const cssHex = (packed: number): string => `#${packed.toString(16).padStart(6, '0')}`;
+
+  /** True while an info view is asking the overlay to show empty cells. */
+  let zoneViewActive = false;
+
+  infoViews.register({
+    id: 'zones',
+    label: 'Zones',
+    icon: 'zones',
+    description: 'Every cell a road has made zonable, painted or not.',
+    legend: [
+      { color: cssHex(ZONE_COLORS.residential), label: 'Residential' },
+      { color: cssHex(ZONE_COLORS.commercial), label: 'Commercial' },
+      { color: cssHex(ZONE_COLORS.industrial), label: 'Industrial' },
+      { color: '#dfe4e8', label: 'Zonable, unpainted' },
+    ],
+    metric: () => {
+      const counts = zoning.counts();
+      const share = counts.zonable > 0 ? (counts.zoned / counts.zonable) * 100 : 0;
+      return {
+        value: `${share.toFixed(0)}%`,
+        label: 'of frontage painted',
+        note:
+          `${formatPopulation(counts.zoned)} of ${formatPopulation(counts.zonable)} cells. ` +
+          'Cells are owned by their road — delete it and they go.',
+      };
+    },
+    apply: (enabled) => {
+      zoneViewActive = enabled;
+    },
+  });
+
+  infoViews.register({
+    id: 'traffic',
+    label: 'Traffic',
+    icon: 'traffic',
+    description: 'Per-edge volume over capacity, tinted onto the carriageway.',
+    legend: [
+      { color: cssHex(ASPHALT_COLOR), label: 'Free flowing' },
+      { color: cssHex(congestionColor(0.6, ASPHALT_COLOR)), label: 'At 60% of capacity' },
+      { color: cssHex(congestionColor(1, ASPHALT_COLOR)), label: 'At or over capacity' },
+    ],
+    metric: () => {
+      const worst = trafficSystem.worstEdge();
+      if (!worst) {
+        return {
+          value: '—',
+          label: 'no assigned flow yet',
+          note: 'Flow is assigned once per in-game day from settled occupancy.',
+        };
+      }
+      return {
+        value: `${(worst.congestion * 100).toFixed(0)}%`,
+        label: 'worst road, of capacity',
+        note:
+          `${formatPopulation(worst.flow)} veh/h on segment ${worst.edgeId} · ` +
+          `${formatPopulation(trafficSystem.totalFlow)} veh/h citywide.`,
+      };
+    },
+    apply: (enabled) => {
+      roadRenderer.setTrafficView(enabled);
+    },
+  });
+
+  infoViews.register({
+    id: 'demand',
+    label: 'Demand',
+    icon: 'demand',
+    description: 'What the market would build next, and why it would not.',
+    legend: [
+      { color: cssHex(ZONE_COLORS.residential), label: 'Residential' },
+      { color: cssHex(ZONE_COLORS.commercial), label: 'Commercial' },
+      { color: cssHex(ZONE_COLORS.industrial), label: 'Industrial' },
+    ],
+    metric: () => {
+      const demand = simulation.state.demand;
+      const entries: Array<[string, number]> = [
+        ['Residential', demand.r],
+        ['Commercial', demand.c],
+        ['Industrial', demand.i],
+      ];
+      entries.sort((a, b) => b[1] - a[1]);
+      const [name, value] = entries[0] as [string, number];
+      const totals = demandSystem.totals;
+      return {
+        value: value.toFixed(2),
+        label: `${name.toLowerCase()} leads`,
+        note:
+          `Housing vacancy ${(totals.vacancyResidential * 100).toFixed(0)}% · ` +
+          `unemployment ${(totals.unemployment * 100).toFixed(0)}%. ` +
+          'Overpaint and vacancy pushes the bars back down.',
+      };
+    },
+  });
+
+  // Reserved slot, shown disabled from the first build so the taxonomy is
+  // visibly extensible (ux-conventions.md §2: locked entries stay visible).
+  infoViews.register({
+    id: 'landvalue',
+    label: 'Land value',
+    icon: 'landvalue',
+    description: 'The diffusing value field services and amenities seed.',
+    available: false,
+    lockedNote: 'Land value arrives with the services milestone.',
+  });
+
+  hud.attachInfoViews(infoViews);
+
+  // The faint tint over unpainted-but-zonable cells is a zone-tool affordance
+  // *and* the zones info view, so it follows either.
   const syncOverlayMode = (): void => {
-    zoneOverlay.setShowEmptyCells(tools.current?.id === 'zones');
+    zoneOverlay.setShowEmptyCells(tools.current?.id === 'zones' || zoneViewActive);
   };
 
   // Route world pointer events to the active tool. The HUD sits in its own
@@ -627,13 +956,72 @@ function boot(): void {
       vehicleRenderer.setVisible(visible);
       return vehicleRenderer.visible;
     },
+
+    camera: rig,
+    worldToScreen: (x, z) => {
+      const rect = canvas.getBoundingClientRect();
+      return rig.project(x, z, rect.width, rect.height);
+    },
+
+    hud,
+    bulldozeTool,
+    infoViews,
+    setBulldozeFilter: (filter) => {
+      bulldozeTool.setFilter(filter);
+      hud.setToolMode('bulldoze', bulldozeTool.filter);
+      return bulldozeTool.filter;
+    },
+    bulldozeTargetAt: (x, z) =>
+      describeTarget(
+        resolveBulldozeTarget(
+          { roads: simulation.roads, zoning, buildings: simulation.buildings },
+          x,
+          z,
+          bulldozeTool.filter,
+          bulldozeTool.brushRadius,
+        ),
+      ),
+    bulldozeAt: (x, z) => {
+      // Frontage must be current: a road placed in the same frame has not been
+      // through a tick yet, so its cells would not resolve as road cells.
+      zoning.rebuildIfStale();
+      return describeTarget(bulldozeTool.demolishAt(x, z));
+    },
+    infoView: () => infoViews.active,
+    setInfoView: (id) => {
+      infoViews.setActive(id);
+      return infoViews.active;
+    },
+    infoViewList: () =>
+      infoViews.all.map((view) => ({
+        id: view.id,
+        label: view.label,
+        available: view.available !== false,
+      })),
+    notify: (title, body, kind) => hud.notify({ title, body, kind }),
+    toasts: () =>
+      hud.notifications.active.map((toast) => ({
+        id: toast.id,
+        kind: toast.kind,
+        title: toast.title,
+        body: toast.body,
+        count: toast.count,
+      })),
+    clearToasts: () => hud.notifications.clear(),
+    setRoadClass: (id) => {
+      roadTool.roadClass = ROAD_CLASSES[id] ? id : roadTool.roadClass;
+      hud.setToolMode('roads', roadTool.roadClass);
+      return roadTool.roadClass;
+    },
   };
 
   console.log(
-    '%cMetropolis%c — roads, zoning, growth, economy and traffic online.\n' +
+    '%cMetropolis%c — roads, zoning, growth, economy, traffic and the UI shell online.\n' +
       'WASD / middle-drag pan · right-drag rotate · wheel zoom · Space pause · 1/2/3 speed\n' +
+      'V select · R roads · Z zones · B bulldoze · ` hides the HUD · Esc leaves an info view\n' +
       'Roads tool: click to start, click to chain segments, Esc or right-click to cancel\n' +
-      'Zones tool: drag to paint, pick De-zone to erase, [ and ] resize the brush',
+      'Zones tool: drag to paint, pick De-zone to erase, [ and ] resize the brush\n' +
+      'Bulldoze tool: hover to price it, click to remove; the options row filters the layer',
     'font-weight:bold;color:#4da3ff',
     'color:inherit',
   );

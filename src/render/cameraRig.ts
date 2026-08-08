@@ -49,6 +49,7 @@ export class CameraRig {
   private pitch = THREE.MathUtils.degToRad(45);
 
   private readonly terrain: Terrain;
+  private readonly projectScratch = new THREE.Vector3();
 
   /**
    * @param terrain Terrain used to keep the target on the ground.
@@ -80,6 +81,35 @@ export class CameraRig {
     this.desiredDistance = clamp(distance, MIN_DISTANCE, MAX_DISTANCE);
     this.distance = this.desiredDistance;
     this.applyTransform();
+  }
+
+  /**
+   * Project a ground position to CSS pixel coordinates inside a viewport.
+   *
+   * The inverse of the raycast {@link InputManager} does every frame, and the
+   * only way an automated driver can aim a real pointer event at a world
+   * position.
+   *
+   * @param x World X.
+   * @param z World Z.
+   * @param width Viewport width in CSS pixels.
+   * @param height Viewport height in CSS pixels.
+   * @param y World Y. Defaults to the terrain height under `(x, z)`.
+   * @returns Pixel coordinates, or `null` when the point is behind the camera.
+   */
+  project(
+    x: number,
+    z: number,
+    width: number,
+    height: number,
+    y: number = this.terrain.heightAt(x, z),
+  ): { x: number; y: number } | null {
+    this.projectScratch.set(x, y, z).project(this.camera);
+    if (this.projectScratch.z > 1) return null;
+    return {
+      x: ((this.projectScratch.x + 1) / 2) * width,
+      y: ((1 - this.projectScratch.y) / 2) * height,
+    };
   }
 
   /** Update the projection matrix after a viewport resize. */

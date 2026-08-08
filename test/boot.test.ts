@@ -26,7 +26,11 @@ import { GrowthSystem } from '../src/sim/growth.js';
 import { BUILDING_LIFT, BuildingRenderer } from '../src/render/buildingMesh.js';
 import { VehicleRenderer, VEHICLE_VARIANTS } from '../src/render/vehicles.js';
 import { TrafficSystem } from '../src/sim/traffic.js';
+import { BulldozeTool } from '../src/input/bulldozeTool.js';
+import { BULLDOZE_FILTERS, BULLDOZE_FILTER_LABELS } from '../src/sim/bulldoze.js';
+import { BULLDOZE_REFUND_FRACTION } from '../src/sim/roads.js';
 import { Hud } from '../src/ui/hud.js';
+import { InfoViewManager } from '../src/ui/infoViews.js';
 
 /** First position on the generated terrain where a 200 m road is buildable. */
 function buildableStart(sim: Simulation): [number, number] {
@@ -499,6 +503,140 @@ describe('boot', () => {
     expect(surface.geometry).toBe(geometry);
 
     roads.dispose();
+  });
+
+  it('drives the bulldozer through the toolbar, the overlay and the ledger', () => {
+    const mount = document.createElement('div');
+    document.body.append(mount);
+
+    const sim = new Simulation(20260101, { sampler: terrain, bounds: WORLD_HALF });
+    sim.addSystem(new ZoningSystem(sim.zoning));
+    const overlay = new ZoneOverlay(sim.zoning, terrain);
+
+    const tools = new ToolManager();
+    tools.register(new SelectTool());
+    const bulldozeTool = new BulldozeTool({
+      world: { roads: sim.roads, zoning: sim.zoning, buildings: sim.buildings },
+      preview: overlay,
+      budget: sim.ledger,
+    });
+    tools.register(bulldozeTool);
+
+    const hud = new Hud(mount, new Engine(), sim.state, tools);
+    hud.registerToolModes(
+      'bulldoze',
+      BULLDOZE_FILTERS.map((filter) => ({
+        id: filter,
+        label: BULLDOZE_FILTER_LABELS[filter],
+        onSelect: () => {
+          tools.setActive('bulldoze');
+          bulldozeTool.setFilter(filter);
+        },
+      })),
+      bulldozeTool.filter,
+    );
+
+    // Lay a road on real terrain, then tick so the frontage pass masks it.
+    const [sx, sz] = buildableStart(sim);
+    const edge = sim.roads.placeSegment(sx, sz, sx + 200, sz);
+    expect(edge).not.toBeNull();
+    sim.step(1);
+    const priced = (edge as { cost: number }).cost;
+
+    // Arm from the toolbar, pick a filter from the options row.
+    (mount.querySelector('button.hud-tool[data-tool="bulldoze"]') as HTMLButtonElement).click();
+    expect(tools.current?.id).toBe('bulldoze');
+    expect(hud.visibleToolModes).toBe('bulldoze');
+    expect(mount.querySelectorAll('button.hud-mode[data-tool="bulldoze"]')).toHaveLength(4);
+    (
+      mount.querySelector(
+        'button.hud-mode[data-tool="bulldoze"][data-mode="roads"]',
+      ) as HTMLButtonElement
+    ).click();
+    expect(bulldozeTool.filter).toBe('roads');
+
+    // Hover prices it; the highlight goes through the zone overlay's preview.
+    const hit = (x: number, z: number) => ({ x, y: terrain.heightAt(x, z), z });
+    tools.pointerMove(hit(sx + 100, sz));
+    expect(bulldozeTool.target?.kind).toBe('road');
+    expect(overlay.previewCount).toBeGreaterThan(0);
+
+    // The click removes it and the refund lands on the ledger's refund line.
+    const before = sim.state.money;
+    tools.pointerDown(hit(sx + 100, sz), 0);
+    expect(sim.roads.edges).toHaveLength(0);
+    expect(sim.state.money).toBeGreaterThan(before);
+    expect(sim.ledger.month.refund).toBe(Math.round(priced * BULLDOZE_REFUND_FRACTION));
+
+    // Nothing left to hit: the highlight empties rather than pointing at a ghost.
+    tools.pointerMove(hit(sx + 100, sz));
+    expect(bulldozeTool.target).toBeNull();
+
+    overlay.dispose();
+    hud.dispose();
+    mount.remove();
+  });
+
+  it('drives the traffic info view from the HUD into the road tint', () => {
+    const mount = document.createElement('div');
+    document.body.append(mount);
+
+    const sim = new Simulation(20260101, { bounds: WORLD_HALF });
+    sim.roads.setSampler(terrain);
+    const [sx, sz] = buildableStart(sim);
+    sim.roads.placeSegment(sx, sz, sx + 200, sz);
+    const roads = new RoadRenderer(sim.roads, terrain);
+    const traffic = new TrafficSystem({
+      roads: sim.roads,
+      buildings: sim.buildings,
+      zoning: sim.zoning,
+      worldHalf: Math.abs(sx + 200) + 8,
+    });
+    for (let i = 0; i < 20; i++) traffic.assign();
+
+    const tools = new ToolManager();
+    tools.register(new SelectTool());
+    const hud = new Hud(mount, new Engine(), sim.state, tools);
+    const views = new InfoViewManager();
+    views.register({
+      id: 'traffic',
+      label: 'Traffic',
+      icon: 'traffic',
+      description: 'Per-edge volume over capacity.',
+      legend: [{ color: '#d1483c', label: 'At capacity' }],
+      metric: () => {
+        const worst = traffic.worstEdge();
+        return worst
+          ? { value: `${(worst.congestion * 100).toFixed(0)}%`, label: 'worst road' }
+          : null;
+      },
+      apply: (on) => roads.setTrafficView(on),
+    });
+    hud.attachInfoViews(views);
+
+    expect(roads.trafficViewEnabled).toBe(false);
+    (mount.querySelector('button.hud-view[data-view="traffic"]') as HTMLButtonElement).click();
+    expect(roads.trafficViewEnabled).toBe(true);
+
+    hud.update(100);
+    const panel = mount.querySelector('.hud-infopanel') as HTMLElement;
+    expect(panel.hidden).toBe(false);
+    expect(panel.querySelector('.hud-infopanel__value')?.textContent).toMatch(/%$/);
+
+    // The tint follows the mode without the geometry being rebuilt.
+    const surface = roads.group.getObjectByName('RoadSurfaces') as THREE.Mesh;
+    const geometry = surface.geometry;
+    roads.updateCongestion(traffic);
+    expect(surface.geometry).toBe(geometry);
+
+    // Clicking the lit opener turns the mode back off.
+    (mount.querySelector('button.hud-view[data-view="traffic"]') as HTMLButtonElement).click();
+    expect(roads.trafficViewEnabled).toBe(false);
+    expect(panel.hidden).toBe(true);
+
+    roads.dispose();
+    hud.dispose();
+    mount.remove();
   });
 
   it('keeps the camera target inside the world when panning hard', () => {
