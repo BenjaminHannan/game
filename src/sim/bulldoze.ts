@@ -41,6 +41,8 @@ import {
   ZONE_GRID_SIZE,
   ZONE_LABELS,
   cellAt,
+  cellCentreX,
+  cellCentreZ,
   cellKey,
   cellX,
   cellZ,
