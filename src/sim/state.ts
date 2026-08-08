@@ -16,6 +16,14 @@ import {
   type RoadNetworkOptions,
 } from './roads.js';
 import { ZoningState, createZoningSaveData, type ZoningSaveData } from './zoning.js';
+import {
+  BuildingStore,
+  cloneBuildingsData,
+  createBuildingsData,
+  normalizeBuildingsData,
+  type BuildingsData,
+} from './buildings.js';
+import { createDemandState, normalizeDemandState, type DemandState } from './demand.js';
 
 /** Default name for a new city. */
 export const DEFAULT_CITY_NAME = 'Riverbend';
@@ -46,6 +54,15 @@ export interface GameState {
    * refreshed on serialize and repopulated on deserialize.
    */
   zoning: ZoningSaveData;
+  /**
+   * Every grown building. Wrapped for editing by {@link Simulation.buildings}.
+   *
+   * The zone grid's `occupant` array is derived from this list and rebuilt on
+   * load, the same way `frontage` is derived from `roads`.
+   */
+  buildings: BuildingsData;
+  /** The three RCI demand scalars, advanced daily by the demand system. */
+  demand: DemandState;
 }
 
 /** Create a fresh game state. */
@@ -58,6 +75,8 @@ export function createGameState(seed: number): GameState {
     tick: 0,
     roads: createRoadNetworkData(),
     zoning: createZoningSaveData(),
+    buildings: createBuildingsData(),
+    demand: createDemandState(),
   };
 }
 
@@ -89,6 +108,9 @@ export class Simulation implements SaveProvider<GameState> {
   /** The zone cell grid, derived from {@link roads} and painted by the player. */
   readonly zoning: ZoningState;
 
+  /** Editing surface over {@link GameState.buildings}. */
+  readonly buildings: BuildingStore;
+
   private readonly systems: System[] = [];
 
   /**
@@ -100,6 +122,7 @@ export class Simulation implements SaveProvider<GameState> {
     this.state = createGameState(seed);
     this.roads = new RoadNetwork(this.state, roadOptions);
     this.zoning = new ZoningState({ network: this.roads });
+    this.buildings = new BuildingStore(this.state, this.zoning);
   }
 
   /** Append a system to the end of the pipeline. */
@@ -137,14 +160,18 @@ export class Simulation implements SaveProvider<GameState> {
       ...this.state,
       roads: cloneRoadNetworkData(this.state.roads),
       zoning: { zoneRuns: [...this.state.zoning.zoneRuns] },
+      buildings: cloneBuildingsData(this.state.buildings),
+      demand: { ...this.state.demand },
     };
   }
 
   deserialize(data: GameState): void {
-    // Read the zoning branch before the merge: a version-1 document has no such
+    // Read the derived branches before the merge: an older document has no such
     // key, and `Object.assign` would silently leave the *previous* session's
-    // zoning in place instead of clearing it.
-    const zoningBranch = (data as Partial<GameState> | null | undefined)?.zoning;
+    // state in place instead of clearing it.
+    const incoming = data as Partial<GameState> | null | undefined;
+    const zoningBranch = incoming?.zoning;
+    const buildingBranch = incoming?.buildings;
     Object.assign(this.state, data);
     // Saves written before roads existed, or hand-edited ones, are repaired
     // rather than trusted; renderers are told to rebuild from the new graph.
@@ -155,6 +182,12 @@ export class Simulation implements SaveProvider<GameState> {
     // normalizes to an empty grid.
     this.zoning.deserialize(zoningBranch);
     this.state.zoning = this.zoning.serialize();
+    // Buildings decode after zoning, because loading them re-derives the zone
+    // grid's `occupant` array. Records that no longer have a road under them
+    // are kept and left stranded: the growth system's viability scan will
+    // condemn them over the next few ticks, which is the correct behaviour.
+    this.buildings.load(normalizeBuildingsData(buildingBranch));
+    this.state.demand = normalizeDemandState(this.state.demand);
   }
 }
 

@@ -13,8 +13,14 @@
  * - 1: engine foundation and the road graph.
  * - 2: adds the `zoning` branch (run-length encoded zone cells). Version-1
  *   documents load as a city with no zoning painted, which is exactly right.
+ * - 3: adds the `buildings` and `demand` branches. Older documents load as a
+ *   city whose zoning has not grown anything yet, which is also exactly right.
+ *
+ * Every branch is read through a `normalize*` function rather than trusted, so
+ * a missing branch degrades instead of throwing and no migration step is needed
+ * for any version so far.
  */
-export const SAVE_VERSION = 2;
+export const SAVE_VERSION = 3;
 
 /** Prefix for localStorage keys holding save slots. */
 export const SLOT_PREFIX = 'metropolis:save:';

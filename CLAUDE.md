@@ -8,6 +8,6 @@ Layout: `src/core` (engine loop, events, rng, noise, save, time) · `src/render`
 
 Project rules:
 
-- Heavy implementation and research run on Opus subagents at low/medium reasoning effort (owner's standing preference).
+- Subagent policy (owner's standing preference): initial build and research phases ran on Opus at low/medium effort; ongoing iteration, polish, and bug-hunt cycles run on Fable at medium effort — high only when a task strongly benefits.
 - Never brand the game "Cities: Skylines" — that's Colossal Order/Paradox's trademark. Original name (working title Metropolis), original code and assets; describing it as "inspired by Cities: Skylines II" is fine.
 - Keep this file lean: pointers over payloads.
